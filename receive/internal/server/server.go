@@ -47,14 +47,15 @@ type Backend interface {
 }
 
 type Config struct {
-	Password     string
-	SessionKey   string
-	WebRoot      string
-	SessionTTL   time.Duration
-	TrustedProxy bool
-	Version      string
-	Logger       *log.Logger
-	Paths        *policy.Paths
+	Password            string
+	SessionKey          string
+	WebRoot             string
+	GeneratedImagesRoot string
+	SessionTTL          time.Duration
+	TrustedProxy        bool
+	Version             string
+	Logger              *log.Logger
+	Paths               *policy.Paths
 }
 
 type Server struct {
@@ -107,6 +108,18 @@ func New(cfg Config, backend Backend, broker *events.Broker) (*Server, error) {
 		return nil, fmt.Errorf("web root %q is not a directory", root)
 	}
 	cfg.WebRoot = root
+	if cfg.GeneratedImagesRoot != "" {
+		generatedRoot, err := filepath.Abs(cfg.GeneratedImagesRoot)
+		if err != nil {
+			return nil, err
+		}
+		if resolved, resolveErr := filepath.EvalSymlinks(generatedRoot); resolveErr == nil {
+			generatedRoot = resolved
+		} else if !errors.Is(resolveErr, os.ErrNotExist) {
+			return nil, resolveErr
+		}
+		cfg.GeneratedImagesRoot = filepath.Clean(generatedRoot)
+	}
 	s := &Server{
 		cfg: cfg, backend: backend, broker: broker, mux: http.NewServeMux(), limiter: newLoginLimiter(),
 		rpcSlots: make(chan struct{}, 16),
@@ -698,6 +711,9 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
 	requested := r.URL.Query().Get("path")
 	canonical, err := s.cfg.Paths.CheckTarget(requested)
 	if err != nil {
+		canonical, err = s.generatedImageTarget(requested)
+	}
+	if err != nil {
 		writeError(w, http.StatusForbidden, "artifact_not_allowed", "文件不在允许的工作目录内")
 		return
 	}
@@ -739,6 +755,21 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
 	// Pin the response length to the size validated above. A concurrent append
 	// cannot make ServeContent stream more than maxArtifactBytes.
 	http.ServeContent(w, r, filepath.Base(canonical), info.ModTime(), io.NewSectionReader(file, 0, info.Size()))
+}
+
+func (s *Server) generatedImageTarget(requested string) (string, error) {
+	if s.cfg.GeneratedImagesRoot == "" || !filepath.IsAbs(requested) {
+		return "", errors.New("not a configured generated image")
+	}
+	canonical, err := filepath.EvalSymlinks(filepath.Clean(requested))
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(s.cfg.GeneratedImagesRoot, canonical)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("generated image is outside the configured directory")
+	}
+	return canonical, nil
 }
 
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {

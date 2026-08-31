@@ -4326,6 +4326,7 @@ body,
   --theme-code: #0c131c;
   --theme-topbar: #101a2a;
   --theme-shadow: 0 18px 50px rgba(0, 0, 0, .42);
+  --theme-scrim: rgba(2, 8, 17, .72);
   --ink-950: var(--theme-canvas);
   --ink-900: var(--theme-surface);
   --ink-850: var(--theme-muted);
@@ -4359,6 +4360,7 @@ body,
     --theme-code: #f6f8fb;
     --theme-topbar: #0b57d0;
     --theme-shadow: 0 18px 50px rgba(26, 57, 92, .15);
+    --theme-scrim: rgba(18, 39, 64, .46);
     --ink-950: var(--theme-canvas);
     --ink-900: var(--theme-surface);
     --ink-850: var(--theme-muted);
@@ -4391,6 +4393,7 @@ body,
   --theme-code: #f6f8fb;
   --theme-topbar: #0b57d0;
   --theme-shadow: 0 18px 50px rgba(26, 57, 92, .15);
+  --theme-scrim: rgba(18, 39, 64, .46);
   --ink-950: var(--theme-canvas);
   --ink-900: var(--theme-surface);
   --ink-850: var(--theme-muted);
@@ -5383,4 +5386,123 @@ body,
   }
   .image-viewer-dialog .modal-header { min-height: 52px; padding: 4px 4px 4px 12px; }
   .image-viewer-stage { padding: 8px; }
+}
+
+/* Theme-safe overlays, agent surfaces and bounded media. */
+.modal,
+.modal > form,
+.dialog-frame,
+.modal-header,
+.modal-body,
+.modal-footer,
+.action-menu,
+.toast {
+  min-width: 0;
+  color: var(--bone-100);
+  border-color: var(--line);
+  background: var(--theme-surface);
+}
+
+.modal::backdrop { background: var(--theme-scrim); }
+.action-menu button { color: var(--bone-200); }
+.action-menu button:hover { background: var(--theme-hover); }
+.field input,
+.field select,
+.field textarea,
+.generic-response-editor,
+.other-answer,
+.elicitation-field > input,
+.elicitation-field > select { color: var(--bone-100); border-color: var(--line-strong); background: var(--theme-input); }
+.request-card,
+.rate-card,
+.raw-status,
+.markdown-body th { color: var(--bone-100); border-color: var(--line); background: var(--theme-muted); }
+
+.agent-context-bar,
+.subagents-panel,
+.subagents-head,
+.subagent-command-settings,
+.subagent-command-bar,
+.subagent-preview,
+.subagent-preview-head {
+  color: var(--bone-100);
+  border-color: var(--line);
+  background: var(--theme-surface);
+}
+.agent-context-bar,
+.subagent-command-settings > summary,
+.subagent-command-bar { background: var(--theme-muted); }
+.subagent-tree,
+.subagent-preview-timeline { color: var(--bone-100); background: var(--theme-canvas); }
+.agent-card { color: var(--bone-100); border-color: var(--line); background: var(--theme-surface); }
+.agent-open:hover { background: var(--theme-hover); }
+.agent-parent-button,
+.agent-card-actions button,
+.subagent-command-bar select,
+.subagent-command-bar > button {
+  color: var(--bone-200);
+  border-color: var(--line-strong);
+  background: var(--theme-input);
+}
+.agent-parent-button,
+.subagent-command-bar > button { color: var(--amber); }
+.subagent-preview-timeline .message-item { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.subagent-preview-timeline .message-avatar { display: none; }
+.subagent-preview-timeline .tool-item,
+.subagent-preview-timeline .plan-item,
+.subagent-preview-timeline .reasoning-item,
+.subagent-preview-timeline .error-item { margin-left: 0; }
+
+.composer-delivery { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.composer-delivery::before { flex: none; margin-right: 0; }
+.composer-delivery > span { min-width: 0; flex: 1; }
+#composerDeliveryClose {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  color: currentColor;
+  background: transparent;
+}
+#composerDeliveryClose[hidden] { display: none; }
+#composerDeliveryClose:hover { background: var(--theme-hover); }
+#composerDeliveryClose svg { width: 15px; height: 15px; }
+
+.image-viewer-dialog.modal,
+.image-viewer-dialog .dialog-frame,
+.image-viewer-dialog .modal-header,
+.image-viewer-dialog .modal-header > div,
+.image-viewer-stage { min-width: 0; }
+.image-viewer-dialog .dialog-frame { width: 100%; }
+.image-viewer-dialog .modal-header > div { flex: 1; overflow: hidden; }
+.image-viewer-stage { position: relative; width: 100%; flex: 1 1 0; overflow: hidden; padding: 0; }
+.image-viewer-stage img { position: absolute; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; object-fit: contain; }
+
+:where(.modal, .action-menu, .subagents-panel) :where(button, input, select, textarea):focus-visible,
+#composerDeliveryClose:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+  .image-viewer-dialog.modal {
+    top: calc(8px + var(--safe-top));
+    right: 8px;
+    bottom: auto;
+    left: 8px;
+    width: auto;
+    height: calc(100dvh - 16px - var(--safe-top) - var(--safe-bottom));
+    max-height: calc(100dvh - 16px - var(--safe-top) - var(--safe-bottom));
+    margin: 0;
+  }
+  .app-view.mobile-detail .agent-context-bar { display: none; }
+  .subagents-panel { background: var(--theme-canvas); }
+  .subagents-head,
+  .subagent-preview-head { background: var(--theme-surface); }
+  .subagent-preview-head { grid-template-columns: 44px minmax(0, 1fr) 44px; }
+  .subagent-preview-head .icon-button,
+  .subagent-preview-head .quiet-button { width: 44px; height: 44px; min-height: 44px; padding: 0; }
 }

@@ -10,7 +10,7 @@
     <link rel="manifest" href="./manifest.webmanifest?v=20260831.3">
     <link rel="icon" href="./icon.png?v=20260831.1" type="image/png" sizes="640x640">
     <link rel="apple-touch-icon" href="./icon.png?v=20260831.1">
-    <link rel="stylesheet" href="./styles.css?v=20260831.22">
+    <link rel="stylesheet" href="./styles.css?v=20260901.2">
     <title>Codex Remote</title>
   </head>
   <body>
@@ -140,11 +140,6 @@
             <aside id="agentContextBar" class="agent-context-bar" aria-label="当前子代理上下文" hidden>
               <button id="returnToParentButton" class="agent-parent-button" type="button"><svg><use href="#i-arrow-left"/></svg><span>返回父会话</span></button>
               <div id="agentContextIdentity" class="agent-context-identity"></div>
-              <div class="agent-context-actions" aria-label="为父 Codex 生成子代理控制指令">
-                <button type="button" data-current-agent-action="steer">生成引导</button>
-                <button type="button" data-current-agent-action="stop">生成停止指令</button>
-                <button type="button" data-current-agent-action="close">生成关闭指令</button>
-              </div>
             </aside>
 
             <section id="subagentsPanel" class="subagents-panel" aria-labelledby="subagentsTitle">
@@ -186,7 +181,7 @@
             <button id="jumpLatest" class="jump-latest" type="button" hidden>回到最新 ↓</button>
 
             <footer class="composer-shell">
-              <div id="composerDelivery" class="composer-delivery" role="status" aria-live="polite" hidden></div>
+              <div id="composerDelivery" class="composer-delivery" role="status" aria-live="polite" hidden><span id="composerDeliveryText"></span><button id="composerDeliveryClose" type="button" aria-label="关闭发送状态" hidden><svg><use href="#i-close"/></svg></button></div>
               <form id="composerForm" class="composer-form">
                 <textarea id="composerInput" rows="1" maxlength="20000" placeholder="输入下一步指令…" aria-label="指令内容"></textarea>
                 <div id="composerAttachments" class="attachment-strip" aria-live="polite" hidden></div>
@@ -329,6 +324,6 @@
 
     <div id="toastRegion" class="toast-region" role="status" aria-live="polite"></div>
     <script src="./markdown.js?v=20260831.2" defer></script>
-    <script src="./app.js?v=20260831.16" defer></script>
+    <script src="./app.js?v=20260901.2" defer></script>
   </body>
 </html>

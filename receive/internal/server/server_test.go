@@ -115,12 +115,17 @@ func newTestServerInstance(t *testing.T, trustedProxy bool) (*Server, *fakeBacke
 	if err != nil {
 		t.Fatal(err)
 	}
+	codexHome := filepath.Join(root, ".codex")
+	generatedImages := filepath.Join(codexHome, "generated_images")
+	if err := os.MkdirAll(generatedImages, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	backend := &fakeBackend{insideCWD: project}
 	sessionKey := "test-session-signing-key-abcdefghijklmnopqrstuvwxyz"
 	password := "correct horse battery staple"
 	webServer, err := New(Config{
 		Password: password, SessionKey: sessionKey, WebRoot: web,
-		SessionTTL: time.Hour, TrustedProxy: trustedProxy, Version: "test", Paths: paths,
+		GeneratedImagesRoot: generatedImages, SessionTTL: time.Hour, TrustedProxy: trustedProxy, Version: "test", Paths: paths,
 	}, backend, events.New(8, 4096))
 	if err != nil {
 		t.Fatal(err)
@@ -702,7 +707,11 @@ func TestLoopbackTLSProxySessionRoundTrip(t *testing.T) {
 }
 
 func TestArtifactRouteServesOnlyAllowedRasterImages(t *testing.T) {
-	handler, backend, token := newTestServer(t)
+	webServer, backend, token := newTestServerInstance(t, false)
+	if err := webServer.cfg.Paths.Protect([]string{filepath.Dir(webServer.cfg.GeneratedImagesRoot)}); err != nil {
+		t.Fatal(err)
+	}
+	handler := webServer.Handler()
 	cookie := loginCookie(t, handler, token)
 	imagePath := filepath.Join(backend.insideCWD, "shot.png")
 	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
@@ -725,6 +734,26 @@ func TestArtifactRouteServesOnlyAllowedRasterImages(t *testing.T) {
 	recorder = doRequest(handler, http.MethodGet, "/api/artifact?path="+url.QueryEscape("/etc/passwd"), "", cookie, "")
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("out-of-root artifact status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	generatedPath := filepath.Join(webServer.cfg.GeneratedImagesRoot, "thread", "generated.png")
+	if err := os.MkdirAll(filepath.Dir(generatedPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(generatedPath, png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recorder = doRequest(handler, http.MethodGet, "/api/artifact?path="+url.QueryEscape(generatedPath), "", cookie, "")
+	if recorder.Code != http.StatusOK || !bytes.Equal(recorder.Body.Bytes(), png) {
+		t.Fatalf("generated image response: status=%d body=%q", recorder.Code, recorder.Body.Bytes())
+	}
+	privatePath := filepath.Join(filepath.Dir(webServer.cfg.GeneratedImagesRoot), "session.json")
+	if err := os.WriteFile(privatePath, []byte(`{"secret":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder = doRequest(handler, http.MethodGet, "/api/artifact?path="+url.QueryEscape(privatePath), "", cookie, "")
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("private Codex state escaped generated-image scope: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

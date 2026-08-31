@@ -24,6 +24,7 @@
     selectedRefreshBusy: false,
     selectSequence: 0,
     pendingRequests: new Map(),
+    composerDeliveries: new Map(),
     currentRequestKey: null,
     eventSource: null,
     reconnectTimer: null,
@@ -183,15 +184,13 @@
       const threadId = state.agentPreviewId;
       if (!threadId) return;
       closeAgentPreview(false);
+      state.subagentPanelOpen = false;
       navigateToAgentThread(threadId);
     });
     $("#subagentPreviewTimeline").addEventListener("click", handleAgentPreviewClick);
     $("#subagentPreviewTimeline").addEventListener("error", handleArtifactError, true);
     $("#returnToParentButton").addEventListener("click", returnToAgentParent);
-    $("#agentContextBar").addEventListener("click", (event) => {
-      const button = event.target.closest("[data-current-agent-action]");
-      if (button) queueAgentInstruction(button.dataset.currentAgentAction, state.selectedId);
-    });
+    $("#composerDeliveryClose").addEventListener("click", dismissComposerDelivery);
     $("#subagentPromptButton").addEventListener("click", createSubagentPromptTemplate);
     $("#subagentModelPreference").addEventListener("change", persistSubagentPreferences);
     $("#subagentEffortPreference").addEventListener("change", persistSubagentPreferences);
@@ -384,6 +383,7 @@
       toast(readableError(error), "warning");
     } finally {
       state.pendingRequests.clear();
+      state.composerDeliveries.clear();
       state.selectedThread = null;
       state.selectedId = null;
       setBusy(button, false);
@@ -641,6 +641,7 @@
       if (threadId === currentAgentRootId()) mergeSelectedIntoList();
       else mergeSubagentThread(state.selectedThread, state.subagents.get(threadId)?.parentId || state.agentTrail.at(-1)?.threadId || currentAgentRootId(), currentAgentRootId());
       reconcileSubagentsFromThread(threadId, state.selectedThread);
+      reconcileComposerDelivery(threadId, state.selectedThread);
       renderThreadDetail(false);
       scheduleTimelineRender(true);
       loadSubagents(currentAgentRootId(), false).catch(() => {});
@@ -662,12 +663,10 @@
       if (state.selectedId !== threadId) return;
       const latest = result?.thread || result;
       if (!latest) return;
-      const hadPendingDelivery = (state.selectedThread?.turns || []).some((turn) => (turn.items || []).some((item) => item.remotePending));
       const merged = mergeLiveThreadSnapshot(state.selectedThread, latest);
       if (!force && threadProgressKey(merged) === threadProgressKey(state.selectedThread)) return;
       const previousRuntime = JSON.stringify(state.selectedRuntime || {});
       state.selectedThread = merged;
-      if (hadPendingDelivery && !(merged.turns || []).some((turn) => (turn.items || []).some((item) => item.remotePending))) setComposerDelivery("accepted", "Codex 已接收引导，正在处理");
       state.selectedRuntime = state.selectedThread.runtime || state.selectedRuntime || {};
       state.activeTurnId = findActiveTurn(state.selectedThread)?.id || null;
       if (JSON.stringify(state.selectedRuntime) !== previousRuntime) {
@@ -677,6 +676,7 @@
       if (threadId === currentAgentRootId()) mergeSelectedIntoList();
       else mergeSubagentThread(state.selectedThread, state.subagents.get(threadId)?.parentId || currentAgentRootId(), currentAgentRootId());
       reconcileSubagentsFromThread(threadId, state.selectedThread);
+      reconcileComposerDelivery(threadId, state.selectedThread);
       renderThreadDetail(false);
       scheduleTimelineRender(false);
     } catch (error) {
@@ -694,7 +694,9 @@
     $("#threadStatusDot").className = `status-dot ${status}`;
     $("#threadStatusLabel").textContent = statusLabel(status, thread.status);
     $("#threadModelLabel").textContent = runtimeModel(thread);
-    $("#threadTitle").textContent = threadTitle(thread);
+    const selectedAgent = state.subagents.get(state.selectedId);
+    const inChild = Boolean(state.selectedId && currentAgentRootId() && state.selectedId !== currentAgentRootId());
+    $("#threadTitle").textContent = inChild && selectedAgent ? agentDisplayName(selectedAgent) : threadTitle(thread);
     const cwd = pathText(thread.cwd || state.selectedRuntime?.cwd);
     $("#threadMeta").textContent = [cwd, compactId(thread.id)].filter(Boolean).join("  ·  ");
     $("#archiveActionText").textContent = state.archived ? "取消归档" : "归档会话";
@@ -704,6 +706,7 @@
     renderAgentContext();
     renderGoalBanner();
     renderSubagentPanel();
+    renderComposerDelivery();
     updateActiveTurnControls();
     if (loading) $("#timeline").innerHTML = '<div class="timeline-empty">正在读取完整记录…</div>';
   }
@@ -881,7 +884,7 @@
     if (!inChild) return;
     const status = agentStatusValue(record?.status || state.selectedThread?.status);
     const parentId = record?.parentId || state.agentTrail.at(-1)?.threadId || rootId;
-    $("#agentContextIdentity").innerHTML = `<span class="agent-context-kicker">CHILD THREAD · ${escapeHtml(agentStatusLabel(status))}</span><strong>${escapeHtml(record ? agentDisplayName(record) : threadTitle(state.selectedThread))}</strong><small>${escapeHtml(record?.role || "SUBAGENT")} · ${escapeHtml(compactId(state.selectedId))} ← ${escapeHtml(compactId(parentId))}</small>`;
+    $("#agentContextIdentity").innerHTML = `<span class="agent-context-kicker">子代理 · ${escapeHtml(agentStatusLabel(status))}</span><strong>${escapeHtml(record ? agentDisplayName(record) : threadTitle(state.selectedThread))}</strong><small>父会话：${escapeHtml(agentThreadLabel(parentId))}</small>`;
     $("#returnToParentButton").setAttribute("aria-label", `返回父会话 ${agentThreadLabel(parentId)}`);
   }
 
@@ -1088,7 +1091,7 @@
       timeline.innerHTML = `<div class="timeline-empty">${escapeHtml(thread.previewError)}</div>`;
       return;
     }
-    const turns = Array.isArray(thread.turns) ? thread.turns : [];
+    const turns = visibleChildTurns(thread, agentParentThread(threadId));
     timeline.innerHTML = turns.length
       ? `<div class="timeline-inner">${turns.map((turn, index) => renderTurn(turn, index)).join("")}</div>`
       : '<div class="timeline-empty">这个子代理还没有可显示的消息。</div>';
@@ -1098,6 +1101,17 @@
       });
       timeline.scrollTop = timeline.scrollHeight;
     });
+  }
+
+  function agentParentThread(threadId) {
+    const parentId = state.subagents.get(threadId)?.parentId || threadParentId(state.subagents.get(threadId)?.thread);
+    return state.threads.find((thread) => thread.id === parentId) || state.subagents.get(parentId)?.thread || (state.selectedId === parentId ? state.selectedThread : null);
+  }
+
+  function visibleChildTurns(thread, parentThread) {
+    const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+    const parentTurnIds = new Set((parentThread?.turns || []).map((turn) => turn?.id).filter(Boolean));
+    return parentTurnIds.size ? turns.filter((turn) => !parentTurnIds.has(turn?.id)) : turns;
   }
 
   function renderAgentGroup(label, records, rootId) {
@@ -1279,7 +1293,9 @@
     const openDetails = new Set($$("details.item[open][data-item-id]", container).map((details) => details.dataset.itemId));
     const userInteracting = openDetails.size > 0 || Date.now() < state.timelineInteractionUntil;
     const nearBottom = !userInteracting && (forceBottom || container.scrollHeight - container.scrollTop - container.clientHeight < 130);
-    const turns = Array.isArray(state.selectedThread?.turns) ? state.selectedThread.turns : [];
+    const turns = state.selectedId !== currentAgentRootId()
+      ? visibleChildTurns(state.selectedThread, agentParentThread(state.selectedId))
+      : Array.isArray(state.selectedThread?.turns) ? state.selectedThread.turns : [];
     if (!turns.length) {
       container.innerHTML = '<div class="timeline-empty">此会话还没有消息。可以从下方发送第一条指令。</div>';
       return;
@@ -1439,9 +1455,10 @@
     const source = image.currentSrc || image.src;
     if (!source) return;
     const dialog = $("#imageViewerDialog");
+    const title = $("figcaption span, figcaption", image.closest("figure"))?.textContent?.trim() || image.alt || "图像预览";
     $("#imageViewerImage").src = source;
     $("#imageViewerImage").alt = image.alt || "图像预览";
-    $("#imageViewerTitle").textContent = image.alt || "图像预览";
+    $("#imageViewerTitle").textContent = title;
     showDialog(dialog);
     if (!history.state?.imageViewer) history.pushState({ ...(history.state || {}), imageViewer: true }, "", location.href);
   }
@@ -1457,7 +1474,7 @@
   function renderArtifactItem(item) {
     const path = item.type === "imageGeneration" ? item.savedPath : item.path;
     const generated = item.type === "imageGeneration";
-    const details = [item.status, item.result, item.revisedPrompt, item.failure].filter(Boolean).map((value) => typeof value === "string" ? value : safeStringify(value));
+    const details = [item.status, item.revisedPrompt, item.failure].filter(Boolean).map((value) => typeof value === "string" ? value : safeStringify(value));
     const preview = path ? `<figure class="artifact-preview" data-artifact-path="${escapeHtml(path)}">
       <a href="${escapeHtml(artifactUrl(path))}" target="_blank" rel="noopener noreferrer" aria-label="在新标签页打开图像 ${escapeHtml(path)}"><img data-artifact-image src="${escapeHtml(artifactUrl(path))}" alt="${escapeHtml(generated ? item.revisedPrompt || "Codex 生成图像" : `Codex 查看图像 ${path}`)}" loading="lazy" decoding="async"></a>
       <figcaption><span>${escapeHtml(shortPath(path))}</span><small>点击查看原图</small></figcaption>
@@ -1522,7 +1539,8 @@
 
   function resolveLocalImage(path) {
     const value = String(path || "");
-    const receiverPrivate = value.includes("/.codex/") || value.includes("/.local/state/codex-remote/");
+    const generatedImage = value.includes("/.codex/generated_images/");
+    const receiverPrivate = (value.includes("/.codex/") && !generatedImage) || value.includes("/.local/state/codex-remote/");
     return !receiverPrivate && /^\/[^?#]+\.(?:png|jpe?g|gif|webp)$/i.test(value) ? artifactUrl(value) : "";
   }
 
@@ -1636,86 +1654,126 @@
     if (active) closeComposerSettings();
   }
 
-  function setComposerDelivery(deliveryState, message) {
-    const delivery = $("#composerDelivery");
-    delivery.hidden = !message;
-    delivery.dataset.state = deliveryState || "";
-    delivery.textContent = message || "";
+  function setComposerDelivery(deliveryState, message, threadId = state.selectedId, details = {}) {
+    if (!threadId) return;
+    if (message) state.composerDeliveries.set(threadId, { ...(state.composerDeliveries.get(threadId) || {}), ...details, state: deliveryState || "", message });
+    else state.composerDeliveries.delete(threadId);
+    if (threadId === state.selectedId) renderComposerDelivery();
+  }
+
+  function renderComposerDelivery() {
+    const container = $("#composerDelivery");
+    if (!container) return;
+    const delivery = state.composerDeliveries.get(state.selectedId);
+    container.hidden = !delivery?.message;
+    container.dataset.state = delivery?.state || "";
+    $("#composerDeliveryText").textContent = delivery?.message || "";
+    $("#composerDeliveryClose").hidden = !["accepted", "error"].includes(delivery?.state);
+  }
+
+  function dismissComposerDelivery() {
+    if (state.selectedId) state.composerDeliveries.delete(state.selectedId);
+    renderComposerDelivery();
+  }
+
+  function reconcileComposerDelivery(threadId, thread) {
+    const delivery = state.composerDeliveries.get(threadId);
+    if (!delivery?.pending || delivery.state === "accepted") return;
+    if (composerDeliveryAccepted(delivery, thread)) setComposerDelivery("accepted", "Codex 已接收引导，正在处理", threadId);
+  }
+
+  function composerDeliveryAccepted(delivery, thread) {
+    const turns = delivery?.turnId ? (thread?.turns || []).filter((turn) => turn.id === delivery.turnId) : thread?.turns || [];
+    return Boolean(delivery?.pending) && turns.some((turn) => (turn.items || []).some((item) => item.type === "userMessage" && !item.remotePending && sameUserMessage(delivery.pending, item)));
   }
 
   async function sendComposer(event) {
     event.preventDefault();
     if (!state.selectedId) return;
     const input = $("#composerInput");
-    const text = input.value.trim();
+    const submittedValue = input.value;
+    const text = submittedValue.trim();
     if (!text && !state.composerFiles.length) return;
+    const threadId = state.selectedId;
+    const targetThread = state.selectedThread;
+    const turnId = state.activeTurnId;
+    const submittedFiles = [...state.composerFiles];
+    const submittedSettings = {
+      dirty: { ...state.composerDirty },
+      model: $("#composerModel").value,
+      effort: runtimeRangeValue($("#composerEffort")),
+      serviceTier: runtimeRangeValue($("#composerServiceTier")),
+      personality: !$("#composerPersonalityField").hidden && !$("#composerPersonality").disabled ? $("#composerPersonality").value : "",
+    };
     const button = $("#sendButton");
-    const steering = Boolean(state.activeTurnId);
-    const attachmentCount = state.composerFiles.length;
+    const steering = Boolean(turnId);
+    const attachmentCount = submittedFiles.length;
     setBusy(button, true, steering ? "引导中…" : "发送中…");
-    setComposerDelivery("sending", attachmentCount ? `正在上传 ${attachmentCount} 个附件并提交给 Remote…` : steering ? "正在提交引导给 Remote…" : "正在提交消息给 Remote…");
+    setComposerDelivery("sending", attachmentCount ? `正在上传 ${attachmentCount} 个附件并提交给 Remote…` : steering ? "正在提交引导给 Remote…" : "正在提交消息给 Remote…", threadId);
     try {
-      const inputs = await turnInputs(text, state.composerFiles);
+      const inputs = await turnInputs(text, submittedFiles);
       let result;
       if (steering) {
-        const turnId = state.activeTurnId;
         const pendingId = `remote-steer-${Date.now()}`;
-        const pending = ensureItem(turnId, pendingId, "userMessage");
-        Object.assign(pending, { content: inputs, remotePending: true, deliveryState: "sending" });
-        scheduleTimelineRender(true);
+        const targetTurn = targetThread?.turns?.find((turn) => turn.id === turnId);
+        if (!targetTurn) throw new Error("当前运行中的 Turn 已结束，请刷新后重试");
+        if (!Array.isArray(targetTurn.items)) targetTurn.items = [];
+        const pending = { id: pendingId, type: "userMessage", content: inputs, remotePending: true, deliveryState: "sending" };
+        targetTurn.items.push(pending);
+        setComposerDelivery("sending", "正在提交引导给 Remote…", threadId, { pending: { type: "userMessage", content: inputs }, pendingId, turnId });
+        if (state.selectedId === threadId) scheduleTimelineRender(true);
         try {
           result = await rpc("turn/steer", {
-            threadId: state.selectedId,
+            threadId,
             expectedTurnId: turnId,
             input: inputs,
           });
-          const queued = findItem(pendingId);
+          const queued = findItemInThread(targetThread, pendingId);
           if (queued) {
             queued.deliveryState = "queued";
-            setComposerDelivery("queued", attachmentCount ? `${attachmentCount} 个附件已上传至 Remote，等待 Codex 接收引导` : "Remote 已接收引导，等待 Codex 处理");
-            scheduleTimelineRender(false);
+            if (state.composerDeliveries.get(threadId)?.state !== "accepted") setComposerDelivery("queued", attachmentCount ? `${attachmentCount} 个附件已上传至 Remote，等待 Codex 接收引导` : "Remote 已接收引导，等待 Codex 处理", threadId);
+            if (state.selectedId === threadId) scheduleTimelineRender(false);
           }
         } catch (error) {
-          const turn = findTurn(turnId);
-          if (turn) turn.items = (turn.items || []).filter((item) => item.id !== pendingId);
-          scheduleTimelineRender(false);
+          targetTurn.items = (targetTurn.items || []).filter((item) => item.id !== pendingId);
+          if (state.selectedId === threadId) scheduleTimelineRender(false);
           throw error;
         }
       } else {
-        const params = { threadId: state.selectedId, input: inputs };
-        const model = $("#composerModel").value;
-        const effort = runtimeRangeValue($("#composerEffort"));
-        const serviceTier = runtimeRangeValue($("#composerServiceTier"));
-        if (state.composerDirty.model && model) params.model = model;
-        if (state.composerDirty.effort) params.effort = effort || null;
-        if (state.composerDirty.serviceTier) params.serviceTier = serviceTier === "__default__" ? null : serviceTier;
-        if (state.composerDirty.personality && !$("#composerPersonalityField").hidden && !$("#composerPersonality").disabled) params.personality = $("#composerPersonality").value;
+        const params = { threadId, input: inputs };
+        if (submittedSettings.dirty.model && submittedSettings.model) params.model = submittedSettings.model;
+        if (submittedSettings.dirty.effort) params.effort = submittedSettings.effort || null;
+        if (submittedSettings.dirty.serviceTier) params.serviceTier = submittedSettings.serviceTier === "__default__" ? null : submittedSettings.serviceTier;
+        if (submittedSettings.dirty.personality && submittedSettings.personality) params.personality = submittedSettings.personality;
         result = await rpc("turn/start", params);
-        state.selectedRuntime = {
-          ...(state.selectedRuntime || {}),
+        const runtime = {
+          ...(targetThread?.runtime || {}),
           ...(params.model ? { model: params.model } : {}),
           ...(Object.prototype.hasOwnProperty.call(params, "effort") ? { effort: params.effort || "" } : {}),
           ...(Object.prototype.hasOwnProperty.call(params, "serviceTier") ? { serviceTier: params.serviceTier || "" } : {}),
           ...(params.personality ? { personality: params.personality } : {}),
         };
-        if (state.selectedThread) state.selectedThread.runtime = state.selectedRuntime;
-        state.composerDirty = { model: false, effort: false, serviceTier: false, personality: false };
+        if (targetThread) targetThread.runtime = runtime;
         const turn = result?.turn || result;
-        if (turn?.id) {
+        if (turn?.id && state.selectedId === threadId) {
+          state.selectedRuntime = runtime;
+          state.composerDirty = { model: false, effort: false, serviceTier: false, personality: false };
           upsertTurn(turn);
           state.activeTurnId = turn.id;
         }
-        setComposerDelivery("accepted", attachmentCount ? `${attachmentCount} 个附件与消息已被 Codex 接收` : "Codex 已接收消息，任务开始运行");
+        setComposerDelivery("accepted", attachmentCount ? `${attachmentCount} 个附件与消息已被 Codex 接收` : "Codex 已接收消息，任务开始运行", threadId);
       }
-      input.value = "";
-      state.composerFiles = [];
-      renderSelectedFiles("composerFiles");
-      closeComposerSettings();
-      resizeComposer();
-      updateActiveTurnControls();
-      scheduleTimelineRender(true);
+      if (input.value === submittedValue) input.value = "";
+      state.composerFiles = state.composerFiles.filter((file) => !submittedFiles.includes(file));
+      if (state.selectedId === threadId) {
+        renderSelectedFiles("composerFiles");
+        closeComposerSettings();
+        resizeComposer();
+        updateActiveTurnControls();
+        scheduleTimelineRender(true);
+      }
     } catch (error) {
-      setComposerDelivery("error", `发送失败：${readableError(error)}`);
+      setComposerDelivery("error", `发送失败：${readableError(error)}`, threadId);
       toast(readableError(error), "error");
     } finally {
       setBusy(button, false);
@@ -3003,6 +3061,12 @@
   function handleNotification(method, params) {
     const threadId = params.threadId || params.conversationId || params.thread?.id;
     scheduleAgentPreviewRefresh(threadId);
+    const trackedDelivery = state.composerDeliveries.get(threadId);
+    if (trackedDelivery?.pending && params.item?.type === "userMessage" && sameUserMessage(trackedDelivery.pending, params.item)) {
+      setComposerDelivery("accepted", "Codex 已接收引导，正在处理", threadId);
+    } else if (trackedDelivery?.turnId && method === "turn/completed" && trackedDelivery.turnId === params.turn?.id) {
+      setComposerDelivery("accepted", "Codex 已完成引导", threadId);
+    }
     const normalizedMethod = String(method || "").replace(/[\/_-]/g, "").toLowerCase();
     if (normalizedMethod.includes("subagentactivity")) {
       const ownerThreadId = params.parentThreadId || params.senderThreadId || threadId || currentAgentRootId();
@@ -3066,7 +3130,7 @@
       item.terminalInteractions.push({ processId: params.processId, stdin: params.stdin || "", receivedAt: Date.now() });
       scheduleTimelineRender(false);
     } else if ((method === "item/started" || method === "item/completed") && threadId === state.selectedId) {
-      if (upsertItem(params.turnId, params.item)) setComposerDelivery("accepted", "Codex 已接收引导，正在处理");
+      if (upsertItem(params.turnId, params.item)) setComposerDelivery("accepted", "Codex 已接收引导，正在处理", threadId);
       scheduleTimelineRender(false);
     } else if (threadId === state.selectedId && method === "item/agentMessage/delta") {
       appendItemField(params.turnId, params.itemId, "agentMessage", "text", params.delta);

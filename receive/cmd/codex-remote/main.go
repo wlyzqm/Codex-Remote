@@ -139,7 +139,7 @@ func runServe(args []string) error {
 	defer backend.Close()
 	web, err := server.New(server.Config{
 		Password: authConfig.Password, SessionKey: sessionKey, WebRoot: *webRoot, SessionTTL: *sessionTTL,
-		TrustedProxy: *trustedProxy, Version: version, Logger: logger, Paths: paths,
+		GeneratedImagesRoot: filepath.Join(*codexHome, "generated_images"), TrustedProxy: *trustedProxy, Version: version, Logger: logger, Paths: paths,
 	}, backend, broker)
 	if err != nil {
 		return err

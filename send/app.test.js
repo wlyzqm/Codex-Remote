@@ -5,13 +5,13 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-function appInternals() {
+function appInternals(elements = {}) {
   const path = require.resolve("./app.js");
   const source = fs.readFileSync(path, "utf8").replace(
     /\n\}\)\(\);\s*$/,
-    "\n  globalThis.__appTest = { mergeLiveThreadSnapshot, mergeTimelineItem, incrementalReasoningItem, rateWindowHtml, renderItem, codeLanguage, highlightSource, resolveLocalImage };\n})();",
+    "\n  globalThis.__appTest = { state, mergeLiveThreadSnapshot, mergeTimelineItem, incrementalReasoningItem, rateWindowHtml, renderItem, codeLanguage, highlightSource, resolveLocalImage, visibleChildTurns, composerDeliveryAccepted, setComposerDelivery, renderComposerDelivery, dismissComposerDelivery };\n})();",
   );
-  const context = { document: { addEventListener() {} }, window: {}, console };
+  const context = { document: { addEventListener() {}, querySelector: (selector) => elements[selector] || null, querySelectorAll: () => [] }, window: {}, console };
   vm.runInNewContext(source, context, { filename: path });
   return context.__appTest;
 }
@@ -148,9 +148,58 @@ test("read-only code preview escapes source and highlights common tokens", () =>
 test("local Markdown images use the protected artifact route outside the thread workspace", () => {
   const { resolveLocalImage } = appInternals();
   assert.equal(resolveLocalImage("/tmp/browser-check.png"), "/api/artifact?path=%2Ftmp%2Fbrowser-check.png");
+  assert.equal(resolveLocalImage("/root/.codex/generated_images/thread/image.png"), "/api/artifact?path=%2Froot%2F.codex%2Fgenerated_images%2Fthread%2Fimage.png");
   assert.equal(resolveLocalImage("/root/.codex/private.png"), "");
   assert.equal(resolveLocalImage("relative.png"), "");
   assert.equal(resolveLocalImage("/tmp/vector.svg"), "");
+});
+
+test("child timelines hide inherited parent turns without dropping child work", () => {
+  const { visibleChildTurns } = appInternals();
+  const parent = { turns: [{ id: "parent-turn" }] };
+  const child = { turns: [{ id: "parent-turn" }, { id: "child-turn" }] };
+  assert.deepEqual(visibleChildTurns(child, parent).map((turn) => turn.id), ["child-turn"]);
+  assert.deepEqual(visibleChildTurns(child, null).map((turn) => turn.id), ["parent-turn", "child-turn"]);
+});
+
+test("steering delivery is accepted only by the matching thread turn", () => {
+  const { composerDeliveryAccepted } = appInternals();
+  const pending = { type: "userMessage", content: [{ type: "text", text: "继续检查" }] };
+  const delivery = { turnId: "turn-a", pending };
+  const accepted = { turns: [{ id: "turn-a", items: [{ id: "server-item", ...pending }] }] };
+  const otherTurn = { turns: [{ id: "turn-b", items: [{ id: "server-item", ...pending }] }] };
+  assert.equal(composerDeliveryAccepted(delivery, accepted), true);
+  assert.equal(composerDeliveryAccepted(delivery, otherTurn), false);
+});
+
+test("composer delivery follows its thread and exposes a dismiss button after success", () => {
+  const elements = {
+    "#composerDelivery": { hidden: true, dataset: {} },
+    "#composerDeliveryText": { textContent: "" },
+    "#composerDeliveryClose": { hidden: true },
+  };
+  const { state, setComposerDelivery, renderComposerDelivery, dismissComposerDelivery } = appInternals(elements);
+  state.selectedId = "thread-a";
+  setComposerDelivery("accepted", "Codex 已接收引导", "thread-a");
+  assert.equal(elements["#composerDelivery"].hidden, false);
+  assert.equal(elements["#composerDeliveryClose"].hidden, false);
+  state.selectedId = "thread-b";
+  renderComposerDelivery();
+  assert.equal(elements["#composerDelivery"].hidden, true);
+  state.selectedId = "thread-a";
+  renderComposerDelivery();
+  assert.equal(elements["#composerDeliveryText"].textContent, "Codex 已接收引导");
+  dismissComposerDelivery();
+  assert.equal(elements["#composerDelivery"].hidden, true);
+});
+
+test("generated image details never render the raw base64 result", () => {
+  const { renderItem } = appInternals();
+  const raw = "iVBORw0KGgo".repeat(1000);
+  const html = renderItem({ id: "generated-1", type: "imageGeneration", status: "completed", savedPath: "/root/.codex/generated_images/thread/image.png", revisedPrompt: "仪表盘参考图", result: raw });
+  assert.match(html, /生成了图像/);
+  assert.match(html, /仪表盘参考图/);
+  assert.doesNotMatch(html, /iVBORw0KGgo/);
 });
 
 test("conversation images open in an in-app viewer that owns browser back", () => {
