@@ -1,0 +1,9 @@
+receive/codex-remote
+config.json
+receive/state/
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx

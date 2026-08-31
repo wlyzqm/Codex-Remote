@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0b1017">
+    <meta name="theme-color" content="#f4f7fb" media="(prefers-color-scheme: light)">
+    <meta name="color-scheme" content="dark light">
+    <meta name="description" content="面向 Codex 的轻量远程控制台">
+    <link rel="manifest" href="./manifest.webmanifest?v=20260831.3">
+    <link rel="icon" href="./icon.png?v=20260831.1" type="image/png" sizes="640x640">
+    <link rel="apple-touch-icon" href="./icon.png?v=20260831.1">
+    <link rel="stylesheet" href="./styles.css?v=20260831.22">
+    <title>Codex Remote</title>
+  </head>
+  <body>
+    <svg class="svg-symbols" aria-hidden="true">
+      <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 8.3A7 7 0 0 1 18.8 10M17.9 15.7A7 7 0 0 1 5.2 14"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+      <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m4 17 5-5 4 4 2-2 5 4"/></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="m4 4 17 8-17 8 3-8-3-8Z"/><path d="M7 12h14"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
+      <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="M4 14h5l2 2h2l2-2h5"/></symbol>
+      <symbol id="i-status" viewBox="0 0 24 24"><path d="M4 18v-3M9 18v-7M14 18V8M19 18V4"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5H5v11h3"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+      <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10M8 11h4a6 6 0 0 0 6-3"/></symbol>
+      <symbol id="i-archive" viewBox="0 0 24 24"><path d="M4 8h16v11H4zM3 4h18v4H3zM9 12h6"/></symbol>
+      <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3M22 12h-3M12 22v-3M2 12h3"/></symbol>
+      <symbol id="i-agents" viewBox="0 0 24 24"><circle cx="8" cy="7" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M2.5 19c.5-4 2.4-6 5.5-6s5 2 5.5 6M13 14.5c1-.8 2.2-1.2 3.7-1.2 2.7 0 4.2 1.7 4.8 5.2"/></symbol>
+      <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 9a6 6 0 0 1 12 0c0 7 3 7 3 8H3c0-1 3-1 3-8Z"/><path d="M10 21h4"/></symbol>
+      <symbol id="i-review" viewBox="0 0 24 24"><path d="M4 4h16v13H8l-4 3V4Z"/><path d="m8 10 2.2 2.2L16 7"/></symbol>
+      <symbol id="i-compact" viewBox="0 0 24 24"><path d="M4 8h16M7 4l-3 4 3 4M17 12l3 4-3 4M4 16h16"/></symbol>
+      <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9"/><path d="M19 13v6H5V5h6"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></symbol>
+      <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4l11-11-4-4L4 16v4Z"/><path d="m13 7 4 4"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3V6Z"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6V3Z"/><path d="M14 3v5h5"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></symbol>
+      <symbol id="i-up" viewBox="0 0 24 24"><path d="m6 14 6-6 6 6"/></symbol>
+    </svg>
+
+    <div id="bootView" class="boot-view" role="status" aria-live="polite">
+      <img class="boot-mark" src="./icon.png?v=20260831.1" alt="" aria-hidden="true">
+      <p>正在连接远程工作台</p>
+      <span class="signal-loader" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    </div>
+
+    <main id="loginView" class="login-view" hidden>
+      <section class="login-panel" aria-labelledby="loginTitle">
+        <div class="terminal-kicker">Codex Remote</div>
+        <h1 id="loginTitle">登录</h1>
+        <p>输入访问密码以连接这台工作站。</p>
+        <form id="loginForm" class="login-form">
+          <label for="passwordInput">访问密码</label>
+          <div class="password-field">
+            <input id="passwordInput" name="password" type="password" autocomplete="current-password" spellcheck="false" required placeholder="输入访问密码">
+            <button id="togglePassword" class="text-button" type="button" aria-label="显示密码">显示</button>
+          </div>
+          <p id="loginError" class="form-error" role="alert" hidden></p>
+          <button class="primary-button wide" type="submit"><span>登录</span></button>
+        </form>
+        <footer>安全会话，密码不会保存在浏览器中</footer>
+      </section>
+    </main>
+
+    <div id="appView" class="app-view" hidden>
+      <header class="topbar">
+        <button class="brand" type="button" data-route="threads" aria-label="返回会话列表">
+          <span class="brand-block">CR</span>
+          <span class="mobile-brand-title">会话</span>
+          <span class="brand-copy"><b>Codex Remote</b><small>远程工作台</small></span>
+        </button>
+        <div class="topbar-actions">
+          <button class="topbar-new-thread" type="button" data-action="new-thread" aria-label="新建会话"><svg><use href="#i-plus"/></svg><span>新建</span></button>
+          <button id="requestsButton" class="status-button" type="button">
+            <svg><use href="#i-inbox"/></svg><span class="desktop-only">待处理</span><b id="requestCount" hidden>0</b>
+          </button>
+          <button id="statusButton" class="connection-pill" type="button" data-state="connecting">
+            <svg><use href="#i-status"/></svg><span class="connection-lamp"></span><span id="connectionText">连接中</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside id="threadPanel" class="thread-panel">
+          <label class="project-filter" for="projectSelect"><span>项目</span><select id="projectSelect" aria-label="工作项目"></select></label>
+
+          <div class="list-toolbar">
+            <label class="archive-toggle"><input id="archivedToggle" type="checkbox"><span></span>归档</label>
+            <button id="refreshThreads" class="quiet-button" type="button"><svg><use href="#i-refresh"/></svg>刷新</button>
+          </div>
+
+          <div id="threadList" class="thread-list" aria-live="polite"></div>
+
+        </aside>
+
+        <section id="detailPanel" class="detail-panel">
+          <div id="emptyDetail" class="empty-detail">
+            <div class="empty-radar" aria-hidden="true"><svg><use href="#i-inbox"/></svg></div>
+            <span class="eyebrow">远程工作台</span>
+            <h2>选择一个会话</h2>
+            <p>查看实时输出、发送下一步指令，或处理工作站发来的权限请求。</p>
+            <button class="secondary-button" type="button" data-action="new-thread"><svg><use href="#i-plus"/></svg>新建会话</button>
+          </div>
+
+          <div id="threadDetail" class="thread-detail" hidden>
+            <header class="detail-header">
+              <button id="mobileBackButton" class="icon-button mobile-back" type="button" aria-label="返回会话列表"><svg><use href="#i-arrow-left"/></svg></button>
+              <div class="detail-title-wrap">
+                <div class="title-status-line"><span id="threadStatusDot" class="status-dot"></span><span id="threadStatusLabel">待机</span><span id="threadModelLabel"></span></div>
+                <h1 id="threadTitle">未命名会话</h1>
+                <p id="threadMeta" class="thread-meta"></p>
+              </div>
+              <div class="thread-actions">
+                <button id="subagentsToggle" class="icon-text-button" type="button" aria-controls="subagentsPanel" aria-expanded="true"><svg><use href="#i-agents"/></svg><span>代理</span><b id="subagentsBadge" hidden>0</b></button>
+                <button id="goalButton" class="icon-text-button" type="button"><svg><use href="#i-target"/></svg><span>目标</span></button>
+                <button id="threadMenuButton" class="icon-button" type="button" aria-haspopup="menu" aria-expanded="false"><svg><use href="#i-more"/></svg></button>
+                <menu id="threadMenu" class="action-menu" hidden>
+                  <button type="button" data-thread-action="files"><svg><use href="#i-folder"/></svg>浏览项目文件</button>
+                  <button class="mobile-thread-menu-item" type="button" data-thread-action="agents"><svg><use href="#i-agents"/></svg>代理</button>
+                  <button class="mobile-thread-menu-item" type="button" data-thread-action="goal"><svg><use href="#i-target"/></svg>目标</button>
+                  <button id="interruptMenuButton" type="button" data-thread-action="interrupt" hidden><svg><use href="#i-stop"/></svg>中断当前工作</button>
+                  <button class="mobile-thread-menu-item" type="button" data-thread-action="requests"><svg><use href="#i-inbox"/></svg>待处理<b id="threadMenuRequestCount" hidden>0</b></button>
+                  <button class="mobile-thread-menu-item" type="button" data-thread-action="status"><svg><use href="#i-status"/></svg>连接状态</button>
+                  <button id="resumeMenuButton" type="button" data-thread-action="resume"><svg><use href="#i-play"/></svg>恢复会话</button>
+                  <button type="button" data-thread-action="fork"><svg><use href="#i-branch"/></svg>创建分支</button>
+                  <button type="button" data-thread-action="review"><svg><use href="#i-review"/></svg>启动代码审查</button>
+                  <button type="button" data-thread-action="compact"><svg><use href="#i-compact"/></svg>压缩上下文</button>
+                  <button type="button" data-thread-action="rename"><svg><use href="#i-edit"/></svg>修改名称</button>
+                  <button id="archiveMenuButton" type="button" data-thread-action="archive"><svg><use href="#i-archive"/></svg><span id="archiveActionText">归档会话</span></button>
+                </menu>
+              </div>
+            </header>
+
+            <aside id="agentContextBar" class="agent-context-bar" aria-label="当前子代理上下文" hidden>
+              <button id="returnToParentButton" class="agent-parent-button" type="button"><svg><use href="#i-arrow-left"/></svg><span>返回父会话</span></button>
+              <div id="agentContextIdentity" class="agent-context-identity"></div>
+              <div class="agent-context-actions" aria-label="为父 Codex 生成子代理控制指令">
+                <button type="button" data-current-agent-action="steer">生成引导</button>
+                <button type="button" data-current-agent-action="stop">生成停止指令</button>
+                <button type="button" data-current-agent-action="close">生成关闭指令</button>
+              </div>
+            </aside>
+
+            <section id="subagentsPanel" class="subagents-panel" aria-labelledby="subagentsTitle">
+              <header class="subagents-head">
+                <div>
+                  <span class="eyebrow">AGENT ARRAY</span>
+                  <h2 id="subagentsTitle">子代理</h2>
+                </div>
+                <div class="subagent-counters" aria-live="polite">
+                  <span><i class="active"></i>ACTIVE <b id="subagentActiveCount">0</b></span>
+                  <span><i class="done"></i>DONE <b id="subagentDoneCount">0</b></span>
+                </div>
+                <div class="subagent-panel-actions">
+                  <button id="refreshSubagents" class="quiet-button" type="button"><svg><use href="#i-refresh"/></svg>同步</button>
+                  <button id="closeSubagents" class="icon-button" type="button" aria-label="关闭子代理栏"><svg><use href="#i-close"/></svg></button>
+                </div>
+              </header>
+              <details class="subagent-command-settings">
+                <summary><span>委派设置</span><small>模型、推理强度与新建模板</small><svg><use href="#i-chevron"/></svg></summary>
+                <div class="subagent-command-bar">
+                  <label><span>委派模型</span><select id="subagentModelPreference" aria-describedby="subagentPreferenceHint"><option value="">继承父会话</option></select></label>
+                  <label><span>推理强度</span><select id="subagentEffortPreference" aria-describedby="subagentPreferenceHint"><option value="">继承父会话</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">XHigh</option><option value="max">Max</option><option value="ultra">Ultra</option></select></label>
+                  <button id="subagentPromptButton" type="button"><svg><use href="#i-plus"/></svg>生成委派模板</button>
+                  <small id="subagentPreferenceHint">仅写入给父 Codex 的自然语言指令，不直接调用代理 RPC。</small>
+                </div>
+              </details>
+              <div id="subagentTree" class="subagent-tree" role="list" aria-live="polite" aria-label="子代理层级"></div>
+              <section id="subagentPreview" class="subagent-preview" hidden>
+                <header class="subagent-preview-head">
+                  <button id="subagentPreviewBack" class="icon-button" type="button" aria-label="返回子代理列表"><svg><use href="#i-arrow-left"/></svg></button>
+                  <div><strong id="subagentPreviewTitle">子代理</strong><small id="subagentPreviewMeta"></small></div>
+                  <button id="openAgentInMain" class="quiet-button" type="button"><span>主区域打开</span><svg><use href="#i-chevron"/></svg></button>
+                </header>
+                <div id="subagentPreviewTimeline" class="subagent-preview-timeline" aria-live="polite"></div>
+              </section>
+            </section>
+
+            <div id="timeline" class="timeline" aria-live="polite" aria-relevant="additions text"></div>
+            <button id="jumpLatest" class="jump-latest" type="button" hidden>回到最新 ↓</button>
+
+            <footer class="composer-shell">
+              <div id="composerDelivery" class="composer-delivery" role="status" aria-live="polite" hidden></div>
+              <form id="composerForm" class="composer-form">
+                <textarea id="composerInput" rows="1" maxlength="20000" placeholder="输入下一步指令…" aria-label="指令内容"></textarea>
+                <div id="composerAttachments" class="attachment-strip" aria-live="polite" hidden></div>
+                <div class="composer-settings" aria-label="下一轮运行设置">
+                  <label><span>MODEL</span><select id="composerModel" aria-label="下一轮模型"><option value="">当前模型</option></select></label>
+                  <label class="runtime-range"><span>思维强度</span><div class="range-line"><input id="composerEffort" type="range" min="0" max="0" value="0" data-output="composerEffortValue" aria-label="下一轮推理强度"><output id="composerEffortValue">默认</output></div></label>
+                  <label id="composerServiceTierField" class="runtime-range"><span>服务等级</span><div class="range-line"><input id="composerServiceTier" type="range" min="0" max="0" value="0" data-output="composerServiceTierValue" aria-label="下一轮服务等级"><output id="composerServiceTierValue">默认</output></div></label>
+                  <label id="composerPersonalityField" hidden><span>PERSONA</span><select id="composerPersonality" aria-label="下一轮个性"><option value="none">无</option><option value="friendly">友好</option><option value="pragmatic">务实</option></select></label>
+                </div>
+                <div class="composer-bottom">
+                  <span id="composerHint">ENTER 换行 · 点击发送</span>
+                  <div class="composer-actions">
+                    <label class="composer-tool-button" aria-label="添加文件"><input id="composerFileInput" type="file" multiple hidden><svg><use href="#i-file"/></svg></label>
+                    <button id="composerSettingsButton" class="composer-tool-button mobile-settings-button" type="button" aria-label="下一轮运行设置" aria-expanded="false"><svg><use href="#i-more"/></svg></button>
+                    <button id="sendButton" class="send-button" type="submit" aria-label="发送指令"><span id="sendLabel">发送</span><svg><use href="#i-send"/></svg></button>
+                  </div>
+                </div>
+              </form>
+            </footer>
+          </div>
+        </section>
+      </main>
+
+    </div>
+
+    <dialog id="newThreadDialog" class="modal sheet-modal">
+      <form id="newThreadForm" method="dialog">
+        <header class="modal-header"><div><span class="eyebrow">选择项目并开始</span><h2>新建会话</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
+        <div class="modal-body form-grid">
+          <div class="field field-wide workspace-field">
+            <div class="workspace-picker-head"><span>工作目录</span><button id="syncWorkspaceDirectories" class="text-button" type="button"><svg><use href="#i-refresh"/></svg>同步最近项目</button></div>
+            <label class="recent-workspace" for="knownWorkspaceSelect"><span>最近项目</span><select id="knownWorkspaceSelect"><option value="">选择最近使用的项目…</option></select></label>
+            <input id="newCwd" name="cwd" type="hidden" value="/" required>
+            <div class="directory-browser">
+              <div class="directory-browser-head">
+                <button id="directoryUpButton" class="icon-button" type="button" aria-label="返回上一级"><svg><use href="#i-up"/></svg></button>
+                <output id="directoryCurrentPath" for="newCwd">/</output>
+              </div>
+              <div id="directoryEntries" class="directory-entries" aria-live="polite"></div>
+            </div>
+            <small id="workspaceDiscoveryHint" class="workspace-discovery-hint">从根目录逐级选择，已自动隐藏不可访问目录</small>
+          </div>
+          <section class="new-runtime-settings field-wide" aria-label="运行设置">
+            <label class="field"><span>模型</span><select id="newModel" name="model" required><option value="">正在读取…</option></select></label>
+            <label id="newEffortField" class="field runtime-range"><span>思维强度</span><div class="range-line"><input id="newEffort" type="range" min="0" max="0" value="0" data-output="newEffortValue"><output id="newEffortValue">默认</output></div></label>
+            <label id="newServiceTierField" class="field runtime-range"><span>服务等级</span><div class="range-line"><input id="newServiceTier" type="range" min="0" max="0" value="0" data-output="newServiceTierValue"><output id="newServiceTierValue">默认</output></div></label>
+          </section>
+          <div class="field field-wide"><label for="newPrompt"><span>首条指令</span></label><textarea id="newPrompt" name="prompt" rows="5" maxlength="20000" placeholder="描述要 Codex 完成的任务"></textarea><div class="new-message-tools"><label class="secondary-button image-picker"><input id="newThreadFileInput" type="file" multiple hidden><svg><use href="#i-file"/></svg>添加文件</label><small>附件合计不超过 8 MiB</small></div><div id="newThreadAttachments" class="attachment-strip" aria-live="polite" hidden></div></div>
+        </div>
+        <footer class="modal-footer"><button class="text-button" type="button" data-close-dialog>取消</button><button id="createThreadSubmit" class="primary-button" type="submit">创建并发送<svg><use href="#i-chevron"/></svg></button></footer>
+      </form>
+    </dialog>
+
+    <dialog id="renameDialog" class="modal compact-modal">
+      <form id="renameForm" method="dialog">
+        <header class="modal-header"><div><span class="eyebrow">SESSION LABEL</span><h2>修改名称</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
+        <div class="modal-body"><label class="field"><span>会话名称</span><input id="renameInput" type="text" maxlength="160" required></label></div>
+        <footer class="modal-footer"><button class="text-button" type="button" data-close-dialog>取消</button><button class="primary-button" type="submit">保存</button></footer>
+      </form>
+    </dialog>
+
+    <dialog id="reviewDialog" class="modal sheet-modal">
+      <form id="reviewForm" method="dialog">
+        <header class="modal-header"><div><span class="eyebrow">CODE REVIEW</span><h2>启动代码审查</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
+        <div class="modal-body form-grid">
+          <label class="field"><span>审查目标</span><select id="reviewTargetType"><option value="uncommittedChanges">未提交变更</option><option value="baseBranch">相对基础分支</option><option value="commit">指定提交</option><option value="custom">自定义说明</option></select></label>
+          <label class="field"><span>运行方式</span><select id="reviewDelivery"><option value="inline">当前会话</option></select></label>
+          <label id="reviewTargetValueField" class="field field-wide" hidden><span id="reviewTargetValueLabel">目标值</span><textarea id="reviewTargetValue" rows="3" maxlength="4000" placeholder="输入基础分支、提交 SHA 或审查说明"></textarea></label>
+        </div>
+        <footer class="modal-footer"><button class="text-button" type="button" data-close-dialog>取消</button><button id="reviewSubmit" class="primary-button" type="submit">启动审查<svg><use href="#i-chevron"/></svg></button></footer>
+      </form>
+    </dialog>
+
+    <dialog id="goalDialog" class="modal sheet-modal">
+      <form id="goalForm" method="dialog">
+        <header class="modal-header"><div><span class="eyebrow">THREAD GOAL</span><h2>会话目标</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
+        <div class="modal-body form-grid">
+          <label class="field field-wide"><span>目标描述</span><textarea id="goalInput" rows="4" maxlength="4000" placeholder="写下这个会话要持续推进的结果" required></textarea></label>
+          <label class="field"><span>状态</span><select id="goalStatus"><option value="active">进行中</option><option value="paused">已暂停</option><option value="blocked">受阻</option><option value="complete">已完成</option></select></label>
+          <label class="field"><span>Token 预算（可选）</span><input id="goalBudget" type="number" inputmode="numeric" min="1" step="1" placeholder="不限制"></label>
+        </div>
+        <footer class="modal-footer split-footer"><button id="clearGoalButton" class="danger-text-button" type="button">清除目标</button><span></span><button class="text-button" type="button" data-close-dialog>取消</button><button class="primary-button" type="submit">保存目标</button></footer>
+      </form>
+    </dialog>
+
+    <dialog id="projectFilesDialog" class="modal sheet-modal project-files-modal">
+      <div class="dialog-frame">
+        <header class="modal-header"><div><span class="eyebrow">PROJECT FILES</span><h2>项目文件</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
+        <div class="project-files-toolbar">
+          <button id="projectFilesBack" class="icon-button" type="button" aria-label="返回上一级"><svg><use href="#i-up"/></svg></button>
+          <output id="projectFilesPath">/</output>
+          <button id="projectFilesRefresh" class="quiet-button" type="button"><svg><use href="#i-refresh"/></svg>刷新</button>
+        </div>
+        <div id="projectFilesBody" class="project-files-body">
+          <div id="projectFilesList" class="project-files-list" aria-live="polite"></div>
+          <section id="projectFilePreview" class="project-file-preview" hidden>
+            <header><button id="projectFilePreviewBack" class="icon-button" type="button" aria-label="返回文件列表"><svg><use href="#i-arrow-left"/></svg></button><div><strong id="projectFileName"></strong><small id="projectFileMeta"></small></div><a id="projectFileDownload" class="secondary-button" href="#" download><svg><use href="#i-download"/></svg>下载</a></header>
+            <pre><code id="projectFileCode"></code></pre>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="requestsDialog" class="modal sheet-modal request-center-modal">
+      <div class="dialog-frame">
+        <header class="modal-header"><div><span class="eyebrow">ACTION QUEUE</span><h2>待处理请求 <b id="requestsTitleCount">0</b></h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
+        <div id="requestsList" class="requests-list modal-body"></div>
+      </div>
+    </dialog>
+
+    <dialog id="requestDialog" class="modal sheet-modal request-modal">
+      <form id="requestForm" method="dialog">
+        <header class="modal-header"><div><span id="requestKicker" class="eyebrow">SERVER REQUEST</span><h2 id="requestTitle">需要确认</h2></div><button class="icon-button" type="button" data-close-request aria-label="暂时收起"><svg><use href="#i-close"/></svg></button></header>
+        <div id="requestBody" class="modal-body request-body"></div>
+        <footer id="requestActions" class="modal-footer request-actions"></footer>
+      </form>
+    </dialog>
+
+    <dialog id="statusDialog" class="modal sheet-modal status-modal">
+      <div class="dialog-frame">
+        <header class="modal-header"><div><span class="eyebrow">NODE TELEMETRY</span><h2>连接状态与设置</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
+        <div class="modal-body">
+          <section class="status-hero"><span id="statusHeroLamp" class="connection-lamp"></span><div><strong id="statusHeroTitle">正在连接</strong><small id="statusHeroDetail">等待工作站响应</small></div><button id="reconnectButton" class="quiet-button" type="button"><svg><use href="#i-refresh"/></svg>重连</button></section>
+          <section class="status-control theme-control"><div><span class="eyebrow">APPEARANCE</span><strong>界面主题</strong><small>选择保存在当前浏览器，下次打开自动沿用</small></div><select id="themeSelect" aria-label="界面主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></section>
+          <section class="status-control text-size-control"><div><span class="eyebrow">READING</span><strong>正文字号</strong><small>内置 HarmonyOS Sans SC；同步调整消息、推理与操作记录</small></div><label class="text-size-picker" for="bodyTextSize"><input id="bodyTextSize" type="range" min="14" max="18" step="1" value="16" aria-label="正文字号"><output id="bodyTextSizeValue" for="bodyTextSize">16 px</output></label></section>
+          <section><div class="section-title"><span>账户剩余额度</span><button id="refreshRates" class="text-button" type="button">刷新</button></div><div id="rateLimits" class="rate-limits"></div></section>
+          <section class="status-control notification-control"><div><span class="eyebrow">LOCAL ALERTS</span><strong>本地系统通知</strong><small id="notificationStatusText">页面退到后台时，只提醒任务完成；关闭页面后不推送</small></div><div class="notification-actions"><button id="notificationButton" class="quiet-button" type="button"><svg><use href="#i-bell"/></svg><span>启用通知</span></button><button id="testNotificationButton" class="quiet-button" type="button" disabled>测试通知</button></div></section>
+          <details class="raw-status"><summary>原始后端状态</summary><pre id="rawStatus">暂无数据</pre></details>
+          <button id="logoutButton" class="logout-button" type="button">退出当前设备</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="imageViewerDialog" class="modal image-viewer-dialog" aria-labelledby="imageViewerTitle">
+      <div class="dialog-frame">
+        <header class="modal-header"><div><h2 id="imageViewerTitle">图像预览</h2></div><button id="imageViewerClose" class="icon-button" type="button" aria-label="关闭图像"><svg><use href="#i-close"/></svg></button></header>
+        <div class="image-viewer-stage"><img id="imageViewerImage" alt=""></div>
+      </div>
+    </dialog>
+
+    <div id="toastRegion" class="toast-region" role="status" aria-live="polite"></div>
+    <script src="./markdown.js?v=20260831.2" defer></script>
+    <script src="./app.js?v=20260831.16" defer></script>
+  </body>
+</html>

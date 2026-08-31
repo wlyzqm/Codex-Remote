@@ -1,0 +1,22 @@
+{
+  "id": "./",
+  "name": "Codex Remote",
+  "short_name": "Codex Remote",
+  "description": "面向 Codex 工作站的轻量远程控制台",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b1017",
+  "theme_color": "#0b1017",
+  "categories": ["developer", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "./icon.png?v=20260831.1",
+      "sizes": "640x640",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

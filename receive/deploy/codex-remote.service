@@ -1,0 +1,24 @@
+[Unit]
+Description=Codex Remote Lite receiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Keep the same user/CODEX_HOME as the Codex sessions you want to control.
+User=root
+Group=root
+WorkingDirectory=/opt/codex-remote
+Environment=CODEX_HOME=/root/.codex
+ExecStart=/opt/codex-remote/receive/codex-remote serve --config /opt/codex-remote/config.json --listen 127.0.0.1:18787
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=15
+UMask=0077
+# Do not add filesystem, /tmp, device, network-family, or privilege sandboxes here.
+# When the shared daemon is unavailable, the receiver starts Codex as its child;
+# systemd restrictions would then silently reduce the tools and projects Codex can use.
+
+[Install]
+WantedBy=multi-user.target
