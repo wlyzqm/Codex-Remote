@@ -2468,7 +2468,7 @@ pre {
 
   .subagents-panel { max-height: min(52dvh, 470px); }
   .subagents-head { min-height: 54px; grid-template-columns: minmax(85px, 1fr) auto auto; gap: 8px; padding: 7px 11px; }
-  .subagents-head .quiet-button { min-width: 38px; padding: 0; font-size: 0; }
+  .subagents-head .quiet-button { min-width: 38px; gap: 0; padding: 0; font-size: 0; }
   .subagents-head .quiet-button svg { width: 15px; height: 15px; }
   .subagent-counters { flex-direction: column; align-items: flex-start; gap: 3px; }
   .subagent-command-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 8px 11px; }
@@ -3965,8 +3965,8 @@ body,
 }
 
 .composer-settings label:focus-within {
-  border-color: #8bb2e8;
-  background: #eef5ff;
+  border-color: var(--amber);
+  background: var(--theme-hover);
 }
 
 .composer-settings label::after {
