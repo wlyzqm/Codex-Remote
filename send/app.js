@@ -4,7 +4,6 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const API_TIMEOUT_MS = 60000;
-  const MAX_UPLOAD_BYTES = 8 << 20;
   const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
   const SUBAGENT_SOURCE_KINDS = ["subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther"];
   const THEME_STORAGE_KEY = "codex-remote:theme";
@@ -78,7 +77,7 @@
   }
 
   const textInput = (text) => ({ type: "text", text, text_elements: [] });
-  const imageInput = (url) => ({ type: "image", url, detail: "auto" });
+  const localImageInput = (path) => ({ type: "localImage", path, detail: "auto" });
 
   document.addEventListener("DOMContentLoaded", bootstrap);
 
@@ -1711,7 +1710,7 @@
     setBusy(button, true, steering ? "引导中…" : "发送中…");
     setComposerDelivery("sending", attachmentCount ? `正在上传 ${attachmentCount} 个附件并提交给 Remote…` : steering ? "正在提交引导给 Remote…" : "正在提交消息给 Remote…", threadId);
     try {
-      const inputs = await turnInputs(text, submittedFiles);
+      const inputs = await turnInputs(text, submittedFiles, (loaded, total, name) => renderUploadProgress("composerFiles", loaded, total, name));
       let result;
       if (steering) {
         const pendingId = `remote-steer-${Date.now()}`;
@@ -1765,6 +1764,7 @@
       }
       if (input.value === submittedValue) input.value = "";
       state.composerFiles = state.composerFiles.filter((file) => !submittedFiles.includes(file));
+      releaseSelectedFiles(submittedFiles);
       if (state.selectedId === threadId) {
         renderSelectedFiles("composerFiles");
         closeComposerSettings();
@@ -1776,6 +1776,7 @@
       setComposerDelivery("error", `发送失败：${readableError(error)}`, threadId);
       toast(readableError(error), "error");
     } finally {
+      clearUploadProgress("composerFiles");
       setBusy(button, false);
       updateActiveTurnControls();
     }
@@ -1801,12 +1802,21 @@
     textarea.rows = Math.min(7, Math.max(2, textarea.value.split("\n").length));
   }
 
-  async function turnInputs(text, attachments) {
-    const images = attachments.filter((file) => IMAGE_TYPES.has(file.type));
-    const files = attachments.filter((file) => !IMAGE_TYPES.has(file.type));
-    const uploaded = await Promise.all(files.map(uploadAttachment));
-    const fileNote = uploaded.length ? `[用户上传文件]\n${uploaded.map((file) => `- ${file.name}（${formatBytes(file.size)}）：${file.path}`).join("\n")}` : "";
-    return [[text, fileNote].filter(Boolean).join("\n\n") || "", ...images].map((value, index) => index === 0 ? textInput(value) : imageInput(value.url)).filter((value) => value.text || value.url);
+  async function turnInputs(text, attachments, onProgress = () => {}) {
+    const total = attachments.reduce((sum, attachment) => sum + attachment.size, 0);
+    const uploaded = [];
+    let completed = 0;
+    for (const attachment of attachments) {
+      const result = attachment.uploaded || await uploadAttachment(attachment, (loaded) => onProgress(completed + loaded, total, attachment.name));
+      attachment.uploaded = result;
+      uploaded.push({ ...result, type: attachment.type });
+      completed += attachment.size;
+      onProgress(completed, total, attachment.name);
+    }
+    const files = uploaded.filter((file) => !IMAGE_TYPES.has(file.type));
+    const images = uploaded.filter((file) => IMAGE_TYPES.has(file.type));
+    const fileNote = files.length ? `[用户上传文件]\n${files.map((file) => `- ${file.name}（${formatBytes(file.size)}）：${file.path}`).join("\n")}` : "";
+    return [textInput([text, fileNote].filter(Boolean).join("\n\n")), ...images.map((file) => localImageInput(file.path))].filter((value) => value.text || value.path);
   }
 
   function closeComposerSettings() {
@@ -1819,9 +1829,7 @@
     input.value = "";
     try {
       for (const file of files) {
-        const attachments = state[stateKey];
-        if (attachments.reduce((sum, attachment) => sum + attachment.size, 0) + file.size > MAX_UPLOAD_BYTES) throw new Error("附件总大小不能超过 8 MiB");
-        attachments.push({ name: file.name, size: file.size, type: file.type, url: await fileDataURL(file) });
+        state[stateKey].push({ name: file.name, size: file.size, type: file.type, file, previewUrl: IMAGE_TYPES.has(file.type) ? URL.createObjectURL(file) : "" });
       }
       renderSelectedFiles(stateKey);
     } catch (error) {
@@ -1830,31 +1838,54 @@
     }
   }
 
-  function uploadAttachment(file) {
-    return request("/api/uploads", { method: "POST", body: JSON.stringify({ name: file.name, data: file.url }) });
-  }
-
-  function fileDataURL(file) {
+  function uploadAttachment(attachment, onProgress) {
     return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ""));
-      reader.onerror = () => reject(new Error(`无法读取 ${file.name}`));
-      reader.readAsDataURL(file);
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/uploads?name=${encodeURIComponent(attachment.name)}`);
+      xhr.responseType = "json";
+      xhr.setRequestHeader("Content-Type", attachment.type || "application/octet-stream");
+      xhr.upload.onprogress = (event) => onProgress(event.loaded);
+      xhr.onload = () => {
+        const payload = xhr.response || {};
+        if (xhr.status >= 200 && xhr.status < 300 && payload.path) return resolve(payload);
+        if (xhr.status === 401 && state.authenticated) showLogin("登录已失效，请重新输入访问密码。");
+        reject(new HttpError(String(payload?.error?.message || payload?.message || `上传失败（${xhr.status}）`), xhr.status, payload));
+      };
+      xhr.onerror = () => reject(new Error(`无法上传 ${attachment.name}`));
+      xhr.send(attachment.file);
     });
   }
 
   function removeSelectedFile(event, stateKey) {
     const button = event.target.closest("[data-remove-file]");
     if (!button) return;
-    state[stateKey].splice(Number(button.dataset.removeFile), 1);
+    releaseSelectedFiles(state[stateKey].splice(Number(button.dataset.removeFile), 1));
     renderSelectedFiles(stateKey);
+  }
+
+  function releaseSelectedFiles(files) {
+    files.forEach((file) => { if (file.previewUrl) URL.revokeObjectURL(file.previewUrl); });
+  }
+
+  function renderUploadProgress(stateKey, loaded, total, name) {
+    const container = $(stateKey === "composerFiles" ? "#composerUploadProgress" : "#newThreadUploadProgress");
+    const percent = total ? Math.min(100, Math.round(loaded / total * 100)) : 100;
+    container.hidden = false;
+    $("progress", container).value = percent;
+    $("span", container).textContent = `${percent}% · ${name}`;
+  }
+
+  function clearUploadProgress(stateKey) {
+    const container = $(stateKey === "composerFiles" ? "#composerUploadProgress" : "#newThreadUploadProgress");
+    container.hidden = true;
+    $("progress", container).value = 0;
   }
 
   function renderSelectedFiles(stateKey) {
     const container = $(stateKey === "composerFiles" ? "#composerAttachments" : "#newThreadAttachments");
     const files = state[stateKey];
     container.hidden = files.length === 0;
-    container.innerHTML = files.map((file, index) => `<figure class="${IMAGE_TYPES.has(file.type) ? "image-attachment" : "file-attachment"}">${IMAGE_TYPES.has(file.type) ? `<img src="${escapeHtml(file.url)}" alt="${escapeHtml(file.name)}">` : '<svg><use href="#i-file"/></svg>'}<figcaption>${escapeHtml(file.name)} · ${formatBytes(file.size)}</figcaption><button type="button" data-remove-file="${index}" aria-label="移除 ${escapeHtml(file.name)}">×</button></figure>`).join("");
+    container.innerHTML = files.map((file, index) => `<figure class="${IMAGE_TYPES.has(file.type) ? "image-attachment" : "file-attachment"}">${IMAGE_TYPES.has(file.type) ? `<img src="${escapeHtml(file.previewUrl)}" alt="${escapeHtml(file.name)}">` : '<svg><use href="#i-file"/></svg>'}<figcaption>${escapeHtml(file.name)} · ${formatBytes(file.size)}</figcaption><button type="button" data-remove-file="${index}" aria-label="移除 ${escapeHtml(file.name)}">×</button></figure>`).join("");
   }
 
   async function createThread(event) {
@@ -1866,15 +1897,17 @@
     const serviceTier = runtimeRangeValue($("#newServiceTier"));
     const prompt = $("#newPrompt").value.trim();
     if (!cwd || (!prompt && !state.newThreadFiles.length)) return;
-    setBusy(button, true, "正在创建…");
+    const submittedFiles = [...state.newThreadFiles];
+    setBusy(button, true, submittedFiles.length ? "正在上传…" : "正在创建…");
     try {
+      const inputs = await turnInputs(prompt, submittedFiles, (loaded, total, name) => renderUploadProgress("newThreadFiles", loaded, total, name));
+      setBusy(button, true, "正在创建…");
       const params = { cwd };
       if (model) params.model = model;
       if (serviceTier) params.serviceTier = serviceTier;
       const start = await rpc("thread/start", params);
       const thread = start?.thread || start;
       if (!thread?.id) throw new Error("工作站没有返回会话 ID");
-      const inputs = await turnInputs(prompt, state.newThreadFiles);
       localStorage.setItem("codex-remote:last-cwd", cwd);
       closeDialog($("#newThreadDialog"));
       state.selectedProject = cwd;
@@ -1893,13 +1926,15 @@
         scheduleTimelineRender(true);
       }
       $("#newPrompt").value = "";
-      state.newThreadFiles = [];
+      state.newThreadFiles = state.newThreadFiles.filter((file) => !submittedFiles.includes(file));
+      releaseSelectedFiles(submittedFiles);
       renderSelectedFiles("newThreadFiles");
       loadThreads(true).catch(() => {});
       toast("会话已创建", "success");
     } catch (error) {
       toast(readableError(error), "error");
     } finally {
+      clearUploadProgress("newThreadFiles");
       setBusy(button, false);
     }
   }

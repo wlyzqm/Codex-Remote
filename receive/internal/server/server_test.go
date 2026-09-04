@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -125,7 +124,8 @@ func newTestServerInstance(t *testing.T, trustedProxy bool) (*Server, *fakeBacke
 	password := "correct horse battery staple"
 	webServer, err := New(Config{
 		Password: password, SessionKey: sessionKey, WebRoot: web,
-		GeneratedImagesRoot: generatedImages, SessionTTL: time.Hour, TrustedProxy: trustedProxy, Version: "test", Paths: paths,
+		GeneratedImagesRoot: generatedImages, UploadRoot: filepath.Join(root, "uploads"),
+		SessionTTL: time.Hour, TrustedProxy: trustedProxy, Version: "test", Paths: paths,
 	}, backend, events.New(8, 4096))
 	if err != nil {
 		t.Fatal(err)
@@ -815,15 +815,16 @@ func TestProjectFilesAreScopedToThreadWorkspace(t *testing.T) {
 	}
 }
 
-func TestUploadStoresSmallAuthenticatedFile(t *testing.T) {
-	handler, _, token := newTestServer(t)
+func TestUploadStoresNineMiBAuthenticatedFile(t *testing.T) {
+	webServer, _, token := newTestServerInstance(t, false)
+	handler := webServer.Handler()
 	cookie := loginCookie(t, handler, token)
-	data := []byte("remote attachment")
-	body, _ := json.Marshal(map[string]any{
-		"name": "notes.txt",
-		"data": "data:text/plain;base64," + base64.StdEncoding.EncodeToString(data),
-	})
-	recorder := doRequest(handler, http.MethodPost, "/api/uploads", string(body), cookie, "")
+	data := append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{0}, (9<<20)-8)...)
+	request := httptest.NewRequest(http.MethodPost, "http://receiver.test/api/uploads?name=image.png", bytes.NewReader(data))
+	request.Header.Set("Content-Type", "image/png")
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("upload response: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -837,8 +838,19 @@ func TestUploadStoresSmallAuthenticatedFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(result.Path) })
 	stored, err := os.ReadFile(result.Path)
-	if err != nil || result.Name != "notes.txt" || result.Size != len(data) || !bytes.Equal(stored, data) {
-		t.Fatalf("stored upload: result=%#v data=%q err=%v", result, stored, err)
+	if err != nil || result.Name != "image.png" || result.Size != len(data) || !bytes.Equal(stored, data) {
+		t.Fatalf("stored upload: result=%#v bytes=%d err=%v", result, len(stored), err)
+	}
+	artifact := doRequest(handler, http.MethodGet, "/api/artifact?path="+url.QueryEscape(result.Path), "", cookie, "")
+	if artifact.Code != http.StatusOK || !bytes.Equal(artifact.Body.Bytes(), data) {
+		t.Fatalf("uploaded image response: status=%d bytes=%d", artifact.Code, artifact.Body.Len())
+	}
+	rpcBody, _ := json.Marshal(map[string]any{"method": "turn/start", "params": map[string]any{
+		"threadId": "inside", "input": []any{map[string]any{"type": "localImage", "path": result.Path}},
+	}})
+	rpcResult := doRequest(handler, http.MethodPost, "/api/rpc", string(rpcBody), cookie, "")
+	if rpcResult.Code != http.StatusOK {
+		t.Fatalf("uploaded local image turn: status=%d body=%s", rpcResult.Code, rpcResult.Body.String())
 	}
 }
 

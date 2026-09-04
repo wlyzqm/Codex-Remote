@@ -10,7 +10,7 @@
     <link rel="manifest" href="./manifest.webmanifest?v=20260831.3">
     <link rel="icon" href="./icon.png?v=20260831.1" type="image/png" sizes="640x640">
     <link rel="apple-touch-icon" href="./icon.png?v=20260831.1">
-    <link rel="stylesheet" href="./styles.css?v=20260901.3">
+    <link rel="stylesheet" href="./styles.css?v=20260904.1">
     <title>Codex Remote</title>
   </head>
   <body>
@@ -185,6 +185,7 @@
               <form id="composerForm" class="composer-form">
                 <textarea id="composerInput" rows="1" maxlength="20000" placeholder="输入下一步指令…" aria-label="指令内容"></textarea>
                 <div id="composerAttachments" class="attachment-strip" aria-live="polite" hidden></div>
+                <div id="composerUploadProgress" class="upload-progress" role="status" aria-live="polite" hidden><progress max="100" value="0"></progress><span></span></div>
                 <div class="composer-settings" aria-label="下一轮运行设置">
                   <label><span>MODEL</span><select id="composerModel" aria-label="下一轮模型"><option value="">当前模型</option></select></label>
                   <label class="runtime-range"><span>思维强度</span><div class="range-line"><input id="composerEffort" type="range" min="0" max="0" value="0" data-output="composerEffortValue" aria-label="下一轮推理强度"><output id="composerEffortValue">默认</output></div></label>
@@ -229,7 +230,7 @@
             <label id="newEffortField" class="field runtime-range"><span>思维强度</span><div class="range-line"><input id="newEffort" type="range" min="0" max="0" value="0" data-output="newEffortValue"><output id="newEffortValue">默认</output></div></label>
             <label id="newServiceTierField" class="field runtime-range"><span>服务等级</span><div class="range-line"><input id="newServiceTier" type="range" min="0" max="0" value="0" data-output="newServiceTierValue"><output id="newServiceTierValue">默认</output></div></label>
           </section>
-          <div class="field field-wide"><label for="newPrompt"><span>首条指令</span></label><textarea id="newPrompt" name="prompt" rows="5" maxlength="20000" placeholder="描述要 Codex 完成的任务"></textarea><div class="new-message-tools"><label class="secondary-button image-picker"><input id="newThreadFileInput" type="file" multiple hidden><svg><use href="#i-file"/></svg>添加文件</label><small>附件合计不超过 8 MiB</small></div><div id="newThreadAttachments" class="attachment-strip" aria-live="polite" hidden></div></div>
+          <div class="field field-wide"><label for="newPrompt"><span>首条指令</span></label><textarea id="newPrompt" name="prompt" rows="5" maxlength="20000" placeholder="描述要 Codex 完成的任务"></textarea><div class="new-message-tools"><label class="secondary-button image-picker"><input id="newThreadFileInput" type="file" multiple hidden><svg><use href="#i-file"/></svg>添加文件</label><small>附件上传完成后再启动会话</small></div><div id="newThreadAttachments" class="attachment-strip" aria-live="polite" hidden></div><div id="newThreadUploadProgress" class="upload-progress" role="status" aria-live="polite" hidden><progress max="100" value="0"></progress><span></span></div></div>
         </div>
         <footer class="modal-footer"><button class="text-button" type="button" data-close-dialog>取消</button><button id="createThreadSubmit" class="primary-button" type="submit">创建并发送<svg><use href="#i-chevron"/></svg></button></footer>
       </form>
@@ -324,6 +325,6 @@
 
     <div id="toastRegion" class="toast-region" role="status" aria-live="polite"></div>
     <script src="./markdown.js?v=20260831.2" defer></script>
-    <script src="./app.js?v=20260901.2" defer></script>
+    <script src="./app.js?v=20260904.1" defer></script>
   </body>
 </html>

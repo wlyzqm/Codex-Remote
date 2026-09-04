@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,7 +31,7 @@ import (
 
 const maxRequestBody = 12 << 20
 const maxArtifactBytes = 32 << 20
-const maxUploadBytes = 8 << 20
+const maxUploadBytes = 512 << 20
 const maxProjectPreviewBytes = 2 << 20
 const maxProjectEntries = 2000
 const maxRevokedSessions = 4096
@@ -51,6 +50,7 @@ type Config struct {
 	SessionKey          string
 	WebRoot             string
 	GeneratedImagesRoot string
+	UploadRoot          string
 	SessionTTL          time.Duration
 	TrustedProxy        bool
 	Version             string
@@ -119,6 +119,18 @@ func New(cfg Config, backend Backend, broker *events.Broker) (*Server, error) {
 			return nil, resolveErr
 		}
 		cfg.GeneratedImagesRoot = filepath.Clean(generatedRoot)
+	}
+	if cfg.UploadRoot == "" {
+		return nil, errors.New("upload root is required")
+	}
+	if cfg.UploadRoot, err = filepath.Abs(cfg.UploadRoot); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(cfg.UploadRoot, 0o700); err != nil {
+		return nil, err
+	}
+	if cfg.UploadRoot, err = filepath.EvalSymlinks(cfg.UploadRoot); err != nil {
+		return nil, err
 	}
 	s := &Server{
 		cfg: cfg, backend: backend, broker: broker, mux: http.NewServeMux(), limiter: newLoginLimiter(),
@@ -307,7 +319,10 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if body.Method == "turn/start" || body.Method == "turn/steer" {
-		params, err = policy.SanitizeTurnParams(body.Method, params)
+		params, err = policy.SanitizeTurnParamsWithLocalImages(body.Method, params, func(path string) error {
+			_, checkErr := s.uploadedFileTarget(path)
+			return checkErr
+		})
 		if err != nil {
 			writeError(w, http.StatusForbidden, "remote_policy_rejected", err.Error())
 			return
@@ -714,6 +729,9 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
 		canonical, err = s.generatedImageTarget(requested)
 	}
 	if err != nil {
+		canonical, err = s.uploadedFileTarget(requested)
+	}
+	if err != nil {
 		writeError(w, http.StatusForbidden, "artifact_not_allowed", "文件不在允许的工作目录内")
 		return
 	}
@@ -768,6 +786,25 @@ func (s *Server) generatedImageTarget(requested string) (string, error) {
 	relative, err := filepath.Rel(s.cfg.GeneratedImagesRoot, canonical)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return "", errors.New("generated image is outside the configured directory")
+	}
+	return canonical, nil
+}
+
+func (s *Server) uploadedFileTarget(requested string) (string, error) {
+	if !filepath.IsAbs(requested) {
+		return "", errors.New("uploaded file path must be absolute")
+	}
+	canonical, err := filepath.EvalSymlinks(filepath.Clean(requested))
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(s.cfg.UploadRoot, canonical)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("file is outside the upload directory")
+	}
+	info, err := os.Stat(canonical)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", errors.New("uploaded file is unavailable")
 	}
 	return canonical, nil
 }
@@ -900,54 +937,53 @@ func (s *Server) writeProjectDirectory(w http.ResponseWriter, directory *os.File
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name string `json:"name"`
-		Data string `json:"data"`
-	}
-	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_upload", err.Error())
-		return
-	}
-	name := filepath.Base(strings.ReplaceAll(strings.TrimSpace(body.Name), "\\", "/"))
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(30 * time.Minute))
+	s.saveUpload(w, cleanUploadName(r.URL.Query().Get("name")), r.Body, r.ContentLength)
+}
+
+func cleanUploadName(value string) string {
+	name := filepath.Base(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"))
 	if name == "." || name == "" || len(name) > 180 || strings.IndexFunc(name, func(r rune) bool { return r < 32 }) >= 0 {
+		return ""
+	}
+	return name
+}
+
+func (s *Server) saveUpload(w http.ResponseWriter, name string, source io.Reader, size int64) {
+	if name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_upload", "文件名无效")
 		return
 	}
-	metadata, encoded, ok := strings.Cut(body.Data, ",")
-	if !ok || !strings.HasPrefix(strings.ToLower(metadata), "data:") || !strings.HasSuffix(strings.ToLower(metadata), ";base64") || base64.StdEncoding.DecodedLen(len(encoded)) > maxUploadBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "invalid_upload", "文件必须是有效的 Base64 数据且不超过 8 MiB")
+	if size > maxUploadBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "upload_too_large", "文件超过工作站 512 MiB 安全上限")
 		return
 	}
-	data, err := base64.StdEncoding.Strict().DecodeString(encoded)
-	if err != nil || len(data) > maxUploadBytes {
-		writeError(w, http.StatusBadRequest, "invalid_upload", "文件数据无效")
-		return
-	}
-	root := filepath.Join(os.TempDir(), "codex-remote-uploads")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		writeError(w, http.StatusInternalServerError, "upload_unavailable", "无法创建临时上传目录")
-		return
-	}
-	pruneUploads(root, time.Now().Add(-7*24*time.Hour))
+	pruneUploads(s.cfg.UploadRoot, time.Now().Add(-7*24*time.Hour))
 	var token [12]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		writeError(w, http.StatusInternalServerError, "upload_unavailable", "无法生成上传文件名")
 		return
 	}
-	path := filepath.Join(root, hex.EncodeToString(token[:])+"-"+name)
+	path := filepath.Join(s.cfg.UploadRoot, hex.EncodeToString(token[:])+"-"+name)
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	var written int64
 	if err == nil {
-		_, err = file.Write(data)
+		written, err = io.Copy(file, io.LimitReader(source, maxUploadBytes+1))
 		if closeErr := file.Close(); err == nil {
 			err = closeErr
 		}
+	}
+	if written > maxUploadBytes {
+		_ = os.Remove(path)
+		writeError(w, http.StatusRequestEntityTooLarge, "upload_too_large", "文件超过工作站 512 MiB 安全上限")
+		return
 	}
 	if err != nil {
 		_ = os.Remove(path)
 		writeError(w, http.StatusInternalServerError, "upload_unavailable", "无法保存上传文件")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"name": name, "path": path, "size": len(data)})
+	writeJSON(w, http.StatusCreated, map[string]any{"name": name, "path": path, "size": written})
 }
 
 func pruneUploads(root string, before time.Time) {

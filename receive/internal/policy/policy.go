@@ -753,6 +753,12 @@ func isHexString(value string) bool {
 // SanitizeTurnParams exposes text plus bounded inline raster images. Local file
 // paths and remote URLs stay blocked at the generic JSON RPC boundary.
 func SanitizeTurnParams(method string, raw json.RawMessage) (json.RawMessage, error) {
+	return SanitizeTurnParamsWithLocalImages(method, raw, nil)
+}
+
+// SanitizeTurnParamsWithLocalImages permits only paths already issued and
+// revalidated by the receiver's authenticated upload endpoint.
+func SanitizeTurnParamsWithLocalImages(method string, raw json.RawMessage, checkLocalImage func(string) error) (json.RawMessage, error) {
 	var params map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &params); err != nil {
 		return nil, err
@@ -780,7 +786,6 @@ func SanitizeTurnParams(method string, raw json.RawMessage) (json.RawMessage, er
 	}
 	inputs := make([]map[string]any, 0, len(rawInputs))
 	totalText := 0
-	totalImages := 0
 	for _, rawInput := range rawInputs {
 		input, err := decodeParamsObject(rawInput)
 		if err != nil {
@@ -812,13 +817,8 @@ func SanitizeTurnParams(method string, raw json.RawMessage) (json.RawMessage, er
 			if json.Unmarshal(input["url"], &imageURL) != nil {
 				return nil, errors.New("image input must contain a data URL")
 			}
-			imageBytes, err := inlineImageBytes(imageURL)
-			if err != nil {
+			if _, err := inlineImageBytes(imageURL); err != nil {
 				return nil, err
-			}
-			totalImages += imageBytes
-			if totalImages > 8<<20 {
-				return nil, errors.New("turn images exceed the 8 MiB limit")
 			}
 			detail := "auto"
 			if rawDetail, present := input["detail"]; present && string(rawDetail) != "null" {
@@ -827,8 +827,23 @@ func SanitizeTurnParams(method string, raw json.RawMessage) (json.RawMessage, er
 				}
 			}
 			inputs = append(inputs, map[string]any{"type": "image", "url": imageURL, "detail": detail})
+		case "localImage":
+			if err := rejectUnknownFields(input, map[string]struct{}{"type": {}, "path": {}, "detail": {}}); err != nil {
+				return nil, err
+			}
+			var path string
+			if json.Unmarshal(input["path"], &path) != nil || path == "" || checkLocalImage == nil || checkLocalImage(path) != nil {
+				return nil, errors.New("local image must reference a validated upload")
+			}
+			detail := "auto"
+			if rawDetail, present := input["detail"]; present && string(rawDetail) != "null" {
+				if json.Unmarshal(rawDetail, &detail) != nil || (detail != "auto" && detail != "low" && detail != "high" && detail != "original") {
+					return nil, errors.New("unsupported image detail")
+				}
+			}
+			inputs = append(inputs, map[string]any{"type": "localImage", "path": path, "detail": detail})
 		default:
-			return nil, errors.New("only text and inline image turn input is exposed remotely")
+			return nil, errors.New("only text and validated image turn input is exposed remotely")
 		}
 	}
 	result := map[string]any{"threadId": threadID, "input": inputs}

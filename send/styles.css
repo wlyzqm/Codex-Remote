@@ -4713,6 +4713,22 @@ body,
 .attachment-strip .file-attachment > svg { width: 30px; height: 30px; color: var(--amber); }
 .attachment-strip .file-attachment figcaption { width: 100%; }
 
+.upload-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 9px 8px;
+  color: var(--bone-400);
+  font-size: 10px;
+}
+.upload-progress[hidden] { display: none; }
+.upload-progress progress { width: 100%; height: 6px; border: 0; border-radius: 999px; overflow: hidden; background: var(--ink-700); }
+.upload-progress progress::-webkit-progress-bar { background: var(--ink-700); }
+.upload-progress progress::-webkit-progress-value { border-radius: 999px; background: var(--blue); }
+.upload-progress progress::-moz-progress-bar { border-radius: 999px; background: var(--blue); }
+.upload-progress span { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 @media (max-width: 720px) {
   .project-files-modal { inset: auto 0 0; width: 100%; height: min(92dvh, 820px); max-width: none; margin: 0; }
   .project-files-body.previewing { grid-template-columns: 1fr; }

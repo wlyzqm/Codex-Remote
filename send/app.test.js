@@ -118,12 +118,19 @@ test("SSE startup closes the first-login backend status race", () => {
   assert.match(source, /"status\.connected"/);
 });
 
-test("new thread starts its first turn before reading materialized history", () => {
+test("new thread uploads before creation and starts its first turn before reading history", () => {
   const source = fs.readFileSync(require.resolve("./app.js"), "utf8");
+  const html = fs.readFileSync(require.resolve("./index.html"), "utf8");
   const createThread = source.slice(source.indexOf("async function createThread"), source.indexOf("function openNewThreadDialog"));
+  const turnInputs = createThread.indexOf("await turnInputs");
+  const threadStart = createThread.indexOf('rpc("thread/start"');
   const turnStart = createThread.indexOf('rpc("turn/start"');
   const selectThread = createThread.indexOf("await selectThread(thread.id)");
-  assert.ok(turnStart >= 0 && selectThread >= 0 && turnStart < selectThread);
+  assert.ok(turnInputs >= 0 && turnInputs < threadStart && threadStart < turnStart && turnStart < selectThread);
+  assert.match(source, /xhr\.upload\.onprogress/);
+  assert.match(source, /localImageInput\(file\.path\)/);
+  assert.match(html, /id="composerUploadProgress"[\s\S]*id="newThreadUploadProgress"/);
+  assert.doesNotMatch(html, /8 MiB/);
 });
 
 test("automatic system notifications are limited to completed turns", () => {

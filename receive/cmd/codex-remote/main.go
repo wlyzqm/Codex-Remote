@@ -101,7 +101,11 @@ func runServe(args []string) error {
 		}
 		*codexHome = filepath.Join(home, ".codex")
 	}
-	protected := []string{*webRoot, *configPath, *codexHome}
+	uploadRoot := filepath.Join(filepath.Dir(*codexHome), ".cache", "codex-remote", "uploads")
+	if err := os.MkdirAll(uploadRoot, 0o700); err != nil {
+		return fmt.Errorf("create upload directory: %w", err)
+	}
+	protected := []string{*webRoot, *configPath, *codexHome, uploadRoot}
 	if executable, err := os.Executable(); err == nil {
 		protected = append(protected, filepath.Dir(executable))
 	}
@@ -139,7 +143,8 @@ func runServe(args []string) error {
 	defer backend.Close()
 	web, err := server.New(server.Config{
 		Password: authConfig.Password, SessionKey: sessionKey, WebRoot: *webRoot, SessionTTL: *sessionTTL,
-		GeneratedImagesRoot: filepath.Join(*codexHome, "generated_images"), TrustedProxy: *trustedProxy, Version: version, Logger: logger, Paths: paths,
+		GeneratedImagesRoot: filepath.Join(*codexHome, "generated_images"), UploadRoot: uploadRoot,
+		TrustedProxy: *trustedProxy, Version: version, Logger: logger, Paths: paths,
 	}, backend, broker)
 	if err != nil {
 		return err
