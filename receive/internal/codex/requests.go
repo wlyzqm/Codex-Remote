@@ -62,7 +62,7 @@ func sanitizeServerResponseWithChecks(request pendingServerRequest, raw json.Raw
 		if request.Method == "item/commandExecution/requestApproval" && !commandDecisionAvailable(request.Params, decision) {
 			return nil, fmt.Errorf("%w: decision is not offered by app-server", ErrInvalidServerResponse)
 		}
-		if decision == "accept" {
+		if decision == "accept" && (checkWorkspace != nil || checkTarget != nil) {
 			var safe bool
 			var reason string
 			if request.Method == "item/fileChange/requestApproval" {
@@ -113,6 +113,9 @@ func serverRequestAcceptance(method string, params json.RawMessage, checkPath fu
 }
 
 func serverRequestAcceptanceWithChecks(method string, params json.RawMessage, checkWorkspace, checkTarget func(string) error) (bool, string) {
+	if checkWorkspace == nil && checkTarget == nil && isRemotelyHandledServerRequest(method) {
+		return true, ""
+	}
 	switch method {
 	case "item/tool/requestUserInput":
 		return true, ""
@@ -477,13 +480,23 @@ func sanitizePermissionsResponseWithChecks(params, raw json.RawMessage, checkWor
 	switch decision {
 	case "accept":
 		var reason string
-		permissions, reason = requestedPermissionGrantWithChecks(params, checkWorkspace, checkTarget)
+		if checkWorkspace == nil && checkTarget == nil {
+			var request struct {
+				Permissions map[string]any `json:"permissions"`
+			}
+			if err := json.Unmarshal(params, &request); err != nil {
+				return nil, err
+			}
+			permissions = request.Permissions
+		} else {
+			permissions, reason = requestedPermissionGrantWithChecks(params, checkWorkspace, checkTarget)
+		}
 		if reason != "" {
 			return nil, fmt.Errorf("%w: %s", ErrInvalidServerResponse, reason)
 		}
 		// Keep reviewing subsequent commands in this turn. A phone approval is
 		// never translated into an unattended session-wide permission change.
-		strictAutoReview = true
+		strictAutoReview = checkWorkspace != nil || checkTarget != nil
 	case "decline", "cancel":
 		// The protocol represents denial as an empty granted subset.
 	default:

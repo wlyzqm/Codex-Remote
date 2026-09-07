@@ -24,7 +24,7 @@ import (
 	"codex-remote/internal/server"
 )
 
-var version = "0.3.0"
+var version = "0.7.1"
 
 type stringList []string
 
@@ -72,7 +72,7 @@ func runServe(args []string) error {
 	allowPublicHTTP := flags.Bool("allow-public-http", false, "explicitly allow cleartext HTTP on a non-loopback address")
 	trustedProxy := flags.Bool("trusted-proxy", false, "trust forwarding headers from the configured TLS reverse proxy")
 	var allowedRoots stringList
-	flags.Var(&allowedRoots, "allow-root", "workspace root available remotely (repeatable)")
+	flags.Var(&allowedRoots, "allow-root", "deprecated; authenticated users can access all workstation paths")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -82,7 +82,7 @@ func runServe(args []string) error {
 	if !listenerSecurityConfigured(*listen, *tlsCert != "", *allowPublicHTTP, *trustedProxy) {
 		return errors.New("refusing public cleartext HTTP; configure direct TLS, pass --trusted-proxy behind a TLS reverse proxy, bind loopback, or explicitly pass --allow-public-http")
 	}
-	paths, err := policy.NewPaths(allowedRoots)
+	paths, err := policy.NewPaths(nil)
 	if err != nil {
 		return err
 	}
@@ -105,18 +105,9 @@ func runServe(args []string) error {
 	if err := os.MkdirAll(uploadRoot, 0o700); err != nil {
 		return fmt.Errorf("create upload directory: %w", err)
 	}
-	protected := []string{*webRoot, *configPath, *codexHome, uploadRoot}
-	if executable, err := os.Executable(); err == nil {
-		protected = append(protected, filepath.Dir(executable))
-	}
-	if *tlsCert != "" {
-		protected = append(protected, *tlsCert, *tlsKey)
-	}
-	if err := paths.Protect(protected); err != nil {
-		return err
-	}
 	logger := log.New(os.Stderr, "codex-remote: ", log.LstdFlags|log.Lmsgprefix)
 	broker := events.New(2048, 2<<20)
+	var web *server.Server
 	emit := func(value any) {
 		data, err := json.Marshal(value)
 		if err != nil {
@@ -124,25 +115,21 @@ func runServe(args []string) error {
 			return
 		}
 		broker.Publish(data)
+		if web != nil {
+			web.Observe(data)
+		}
 	}
 	backend, err := codex.New(codex.Config{
 		Mode: *appServerMode, CodexBin: *codexBin, CodexHome: *codexHome,
 		DaemonSocket: *daemonSocket, IdleTimeout: *idleTimeout, Logger: logger, Emit: emit,
-		CheckWorkspace: func(path string) error {
-			_, err := paths.Check(path)
-			return err
-		},
-		CheckPath: func(path string) error {
-			_, err := paths.CheckTarget(path)
-			return err
-		},
 	})
 	if err != nil {
 		return err
 	}
 	defer backend.Close()
-	web, err := server.New(server.Config{
-		Password: authConfig.Password, SessionKey: sessionKey, WebRoot: *webRoot, SessionTTL: *sessionTTL,
+	web, err = server.New(server.Config{
+		CodexHome: *codexHome,
+		Password:  authConfig.Password, SessionKey: sessionKey, WebRoot: *webRoot, SessionTTL: *sessionTTL,
 		GeneratedImagesRoot: filepath.Join(*codexHome, "generated_images"), UploadRoot: uploadRoot,
 		TrustedProxy: *trustedProxy, Version: version, Logger: logger, Paths: paths,
 	}, backend, broker)

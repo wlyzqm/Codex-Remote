@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +47,7 @@ type Backend interface {
 }
 
 type Config struct {
+	CodexHome           string
 	Password            string
 	SessionKey          string
 	WebRoot             string
@@ -59,15 +61,19 @@ type Config struct {
 }
 
 type Server struct {
-	cfg       Config
-	backend   Backend
-	broker    *events.Broker
-	mux       *http.ServeMux
-	limiter   *loginLimiter
-	rpcSlots  chan struct{}
-	sessionMu sync.Mutex
-	revoked   map[string]time.Time
-	streams   map[string]map[*sessionStream]struct{}
+	settingsMu   sync.Mutex
+	activity     *activityStore
+	cfg          Config
+	backend      Backend
+	broker       *events.Broker
+	mux          *http.ServeMux
+	limiter      *loginLimiter
+	rpcSlots     chan struct{}
+	submissionMu sync.Mutex
+	submissions  map[string]bool
+	sessionMu    sync.Mutex
+	revoked      map[string]time.Time
+	streams      map[string]map[*sessionStream]struct{}
 }
 
 type sessionStream struct {
@@ -136,6 +142,13 @@ func New(cfg Config, backend Backend, broker *events.Broker) (*Server, error) {
 		cfg: cfg, backend: backend, broker: broker, mux: http.NewServeMux(), limiter: newLoginLimiter(),
 		rpcSlots: make(chan struct{}, 16),
 		revoked:  make(map[string]time.Time), streams: make(map[string]map[*sessionStream]struct{}),
+		submissions: make(map[string]bool),
+	}
+	if err := s.loadActivity(); err != nil {
+		return nil, err
+	}
+	if err := s.recoverSettings(); err != nil {
+		return nil, err
 	}
 	s.routes()
 	return s, nil
@@ -146,6 +159,8 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("GET /api/codex/settings", s.requireAuth(s.handleSettings))
+	s.mux.HandleFunc("POST /api/codex/settings", s.requireAuth(s.handleSettings))
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.mux.HandleFunc("POST /api/login", s.handleLogin)
 	s.mux.HandleFunc("GET /api/session", s.handleSession)
@@ -157,8 +172,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/requests", s.requireAuth(s.handleRequests))
 	s.mux.HandleFunc("POST /api/requests/{key}/respond", s.requireAuth(s.handleRespond))
 	s.mux.HandleFunc("GET /api/artifact", s.requireAuth(s.handleArtifact))
+	s.mux.HandleFunc("POST /api/files/archive", s.requireAuth(s.handleArchive))
 	s.mux.HandleFunc("GET /api/files", s.requireAuth(s.handleFiles))
 	s.mux.HandleFunc("POST /api/uploads", s.requireAuth(s.handleUpload))
+	s.mux.HandleFunc("GET /api/uploads", s.requireAuth(s.handleUploads))
+	s.mux.HandleFunc("DELETE /api/uploads", s.requireAuth(s.handleUploads))
 	s.mux.HandleFunc("GET /", s.handleStatic)
 }
 
@@ -288,8 +306,9 @@ func (s *Server) handleDirectories(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Method string          `json:"method"`
-		Params json.RawMessage `json:"params"`
+		Method          string          `json:"method"`
+		Params          json.RawMessage `json:"params"`
+		ClientRequestID string          `json:"clientRequestId"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -320,7 +339,7 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if body.Method == "turn/start" || body.Method == "turn/steer" {
 		params, err = policy.SanitizeTurnParamsWithLocalImages(body.Method, params, func(path string) error {
-			_, checkErr := s.uploadedFileTarget(path)
+			_, checkErr := s.cfg.Paths.CheckTarget(path)
 			return checkErr
 		})
 		if err != nil {
@@ -340,7 +359,7 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if requiresExistingThread(body.Method) {
+	if requiresExistingThread(body.Method) && !s.cfg.Paths.Unrestricted() {
 		threadID := policy.ThreadID(params)
 		if threadID == "" {
 			writeError(w, http.StatusBadRequest, "thread_id_required", "缺少 threadId")
@@ -353,14 +372,46 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	if body.ClientRequestID != "" {
+		if !s.beginSubmission(w, body.ClientRequestID, body.Method, params) {
+			return
+		}
+		// Keep the original result even when the browser loses its connection.
+		defer func() {
+			s.submissionMu.Lock()
+			delete(s.submissions, body.ClientRequestID)
+			s.submissionMu.Unlock()
+		}()
+	}
+	ctx := r.Context()
+	if body.ClientRequestID != "" {
+		ctx = context.WithoutCancel(ctx)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	result, rpcErr, callErr := s.backend.Call(ctx, body.Method, params)
 	if callErr != nil {
-		writeError(w, http.StatusBadGateway, "app_server_unavailable", callErr.Error())
+		code := "app_server_unavailable"
+		if body.ClientRequestID != "" {
+			code = "submission_unknown"
+			if errors.Is(callErr, codex.ErrNotSubmitted) {
+				code = "submission_not_sent"
+				response, _ := json.Marshal(map[string]any{"error": map[string]string{"code": code, "message": callErr.Error()}})
+				if !s.completeSubmission(w, body.ClientRequestID, http.StatusBadGateway, response) {
+					return
+				}
+			}
+		}
+		writeError(w, http.StatusBadGateway, code, callErr.Error())
 		return
 	}
 	if rpcErr != nil {
+		if body.ClientRequestID != "" {
+			response, _ := json.Marshal(map[string]any{"error": rpcErr})
+			if !s.completeSubmission(w, body.ClientRequestID, http.StatusUnprocessableEntity, response) {
+				return
+			}
+		}
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": rpcErr})
 		return
 	}
@@ -383,6 +434,12 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Method == "thread/read" {
 			result = attachThreadRuntime(result)
+		}
+	}
+	if body.ClientRequestID != "" {
+		response, _ := json.Marshal(map[string]any{"result": result})
+		if !s.completeSubmission(w, body.ClientRequestID, http.StatusOK, response) {
+			return
 		}
 	}
 	writeRawResult(w, result)
@@ -535,6 +592,9 @@ func attachThreadRuntime(result json.RawMessage) json.RawMessage {
 }
 
 func (s *Server) checkThreadResult(result json.RawMessage) error {
+	if s.cfg.Paths.Unrestricted() {
+		return nil
+	}
 	var envelope struct {
 		Thread struct {
 			CWD string `json:"cwd"`
@@ -574,7 +634,7 @@ func (s *Server) filterThreadList(result json.RawMessage) (json.RawMessage, erro
 			CWD string `json:"cwd"`
 		}
 		if json.Unmarshal(raw, &thread) == nil {
-			if _, err := s.cfg.Paths.Check(thread.CWD); err == nil {
+			if _, err := s.cfg.Paths.Check(thread.CWD); err == nil || s.cfg.Paths.Unrestricted() {
 				if thread.ID != "" {
 					if _, duplicate := seenIDs[thread.ID]; duplicate {
 						continue
@@ -695,7 +755,10 @@ func writeSSE(w io.Writer, event events.Event) {
 }
 
 func (s *Server) handleRequests(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"data": s.backend.PendingRequests()})
+	s.activity.Lock()
+	history := append([]requestHistory(nil), s.activity.History...)
+	s.activity.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"data": s.backend.PendingRequests(), "history": history})
 }
 
 func (s *Server) handleRespond(w http.ResponseWriter, r *http.Request) {
@@ -810,14 +873,18 @@ func (s *Server) uploadedFileTarget(requested string) (string, error) {
 }
 
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
-	workspace, err := s.threadWorkspace(r.Context(), r.URL.Query().Get("threadId"))
+	workspace := string(filepath.Separator)
+	var err error
+	if !filepath.IsAbs(r.URL.Query().Get("path")) {
+		workspace, err = s.threadWorkspace(r.Context(), r.URL.Query().Get("threadId"))
+	}
 	if err != nil {
 		writeError(w, http.StatusForbidden, "thread_not_allowed", "会话工作目录不可用")
 		return
 	}
 	canonical, relative, err := s.projectPath(workspace, r.URL.Query().Get("path"))
 	if err != nil {
-		writeError(w, http.StatusForbidden, "file_not_allowed", "文件不在当前项目内")
+		writeError(w, http.StatusNotFound, "file_unavailable", "文件不存在或已移动")
 		return
 	}
 	file, err := openArtifactFile(canonical)
@@ -868,6 +935,20 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnsupportedMediaType, "file_not_text", "二进制文件不支持在线预览，请直接下载")
 		return
 	}
+	if r.URL.Query().Get("preview") == "1" {
+		extension := strings.ToLower(filepath.Ext(canonical))
+		if extension != ".html" && extension != ".htm" && extension != ".svg" {
+			writeError(w, 415, "preview_unsupported", "此文件不支持格式化页面预览")
+			return
+		}
+		// Separate document policy permits its CSS without relaxing the app's CSP.
+		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Disposition", "inline")
+		_, _ = w.Write(data)
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", "inline")
 	_, _ = w.Write(data)
@@ -875,28 +956,14 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) projectPath(workspace, requested string) (string, string, error) {
 	requested = filepath.FromSlash(strings.TrimSpace(requested))
-	if requested == "" {
-		requested = "."
+	if !filepath.IsAbs(requested) {
+		requested = filepath.Join(workspace, requested)
 	}
-	if filepath.IsAbs(requested) {
-		return "", "", errors.New("project paths must be relative")
-	}
-	clean := filepath.Clean(requested)
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", "", errors.New("project path escapes the workspace")
-	}
-	canonical, err := filepath.EvalSymlinks(filepath.Join(workspace, clean))
+	canonical, err := filepath.EvalSymlinks(requested)
 	if err != nil {
 		return "", "", err
 	}
-	relative, err := filepath.Rel(workspace, canonical)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", "", errors.New("project path escapes the workspace")
-	}
-	if relative == "." {
-		relative = ""
-	}
-	return canonical, filepath.ToSlash(relative), nil
+	return canonical, filepath.ToSlash(canonical), nil
 }
 
 func (s *Server) writeProjectDirectory(w http.ResponseWriter, directory *os.File, workspace, relative string) {
@@ -924,6 +991,12 @@ func (s *Server) writeProjectDirectory(w http.ResponseWriter, directory *os.File
 			"type": map[bool]string{true: "directory", false: "file"}[info.IsDir()], "size": info.Size(),
 		})
 	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i]["type"] != entries[j]["type"] {
+			return entries[i]["type"] == "directory"
+		}
+		return strings.ToLower(entries[i]["name"].(string)) < strings.ToLower(entries[j]["name"].(string))
+	})
 	parent := ""
 	if relative != "" {
 		parent = filepath.ToSlash(filepath.Dir(filepath.FromSlash(relative)))
@@ -958,7 +1031,7 @@ func (s *Server) saveUpload(w http.ResponseWriter, name string, source io.Reader
 		writeError(w, http.StatusRequestEntityTooLarge, "upload_too_large", "文件超过工作站 512 MiB 安全上限")
 		return
 	}
-	pruneUploads(s.cfg.UploadRoot, time.Now().Add(-7*24*time.Hour))
+	// Referenced attachments remain available until the user deletes them.
 	var token [12]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		writeError(w, http.StatusInternalServerError, "upload_unavailable", "无法生成上传文件名")
@@ -1253,7 +1326,8 @@ func canonicalAuthority(scheme, authority, forwardedPort string) (string, bool) 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
-		w.Header().Set("Referrer-Policy", "no-referrer")
+		// Native POST downloads need a non-null Origin; do not send referrers cross-origin.
+		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")

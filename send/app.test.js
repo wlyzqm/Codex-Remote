@@ -5,13 +5,14 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-function appInternals(elements = {}) {
+function appInternals(elements = {}, globals = {}, overrides = {}) {
   const path = require.resolve("./app.js");
+  const replacements = Object.keys(overrides).map((name) => `${name} = globalThis.__testOverrides.${name};`).join("\n");
   const source = fs.readFileSync(path, "utf8").replace(
     /\n\}\)\(\);\s*$/,
-    "\n  globalThis.__appTest = { state, mergeLiveThreadSnapshot, mergeTimelineItem, incrementalReasoningItem, rateWindowHtml, renderItem, codeLanguage, highlightSource, resolveLocalImage, visibleChildTurns, composerDeliveryAccepted, setComposerDelivery, renderComposerDelivery, dismissComposerDelivery };\n})();",
+    `\n ${replacements}\n  globalThis.__appTest = { renderTimeline, renderProjectDirectory, state, loadThreads, renderGoalUsage, scheduleStateRefresh, saveComposerDraft, restoreComposerDraft, composerDraft, saveSubmission, readSubmission, sendComposer, deliverComposerSubmission, createThread, HttpError, mergeLiveThreadSnapshot, mergeTimelineItem, incrementalReasoningItem, rateWindowHtml, renderItem, codeLanguage, highlightSource, resolveLocalImage, visibleChildTurns, composerDeliveryAccepted, setComposerDelivery, renderComposerDelivery, dismissComposerDelivery };\n})();`,
   );
-  const context = { document: { addEventListener() {}, querySelector: (selector) => elements[selector] || null, querySelectorAll: () => [] }, window: {}, console };
+  const context = { document: { addEventListener() {}, querySelector: (selector) => elements[selector] || null, querySelectorAll: () => [] }, window: {}, console, __testOverrides: overrides, ...globals };
   vm.runInNewContext(source, context, { filename: path });
   return context.__appTest;
 }
@@ -103,10 +104,25 @@ test("execution output is collapsed behind a concise activity summary", () => {
   assert.doesNotMatch(html, /<details[^>]+open/);
 });
 
-test("healthy SSE does not poll the complete selected thread", () => {
-  const source = fs.readFileSync(require.resolve("./app.js"), "utf8");
-  assert.doesNotMatch(source, /setInterval\(refreshSelectedThread/);
-  assert.match(source, /source\.onopen[\s\S]*refreshSelectedThread\(true\)/);
+test("cross-client refresh runs without SSE events and stops when hidden", async () => {
+  let callback;
+  let reads = 0;
+  let schedules = 0;
+  const document = { addEventListener() {}, hidden: false };
+  const app = appInternals({}, {
+    document, navigator: { onLine: true }, clearTimeout() {},
+    setTimeout(fn, delay) { callback = fn; schedules++; assert.equal(delay, 3000); return schedules; },
+  }, { refreshSelectedThread: async () => { reads++; }, loadThreads: async () => {} });
+  app.state.authenticated = true;
+  app.state.activeTurnId = "turn-a";
+  app.state.sseConnected = true;
+  app.scheduleStateRefresh();
+  await callback();
+  assert.equal(reads, 1);
+  document.hidden = true;
+  await callback();
+  assert.equal(reads, 1);
+  assert.equal(schedules, 2);
 });
 
 test("SSE startup closes the first-login backend status race", () => {
@@ -118,29 +134,6 @@ test("SSE startup closes the first-login backend status race", () => {
   assert.match(source, /"status\.connected"/);
 });
 
-test("new thread uploads before creation and starts its first turn before reading history", () => {
-  const source = fs.readFileSync(require.resolve("./app.js"), "utf8");
-  const html = fs.readFileSync(require.resolve("./index.html"), "utf8");
-  const createThread = source.slice(source.indexOf("async function createThread"), source.indexOf("function openNewThreadDialog"));
-  const turnInputs = createThread.indexOf("await turnInputs");
-  const threadStart = createThread.indexOf('rpc("thread/start"');
-  const turnStart = createThread.indexOf('rpc("turn/start"');
-  const selectThread = createThread.indexOf("await selectThread(thread.id)");
-  assert.ok(turnInputs >= 0 && turnInputs < threadStart && threadStart < turnStart && turnStart < selectThread);
-  assert.match(source, /xhr\.upload\.onprogress/);
-  assert.match(source, /localImageInput\(file\.path\)/);
-  assert.match(html, /id="composerUploadProgress"[\s\S]*id="newThreadUploadProgress"/);
-  assert.doesNotMatch(html, /8 MiB/);
-});
-
-test("automatic system notifications are limited to completed turns", () => {
-  const source = fs.readFileSync(require.resolve("./app.js"), "utf8");
-  const serverEvents = source.slice(source.indexOf("function handleEvent"), source.indexOf("function handleNotification"));
-  const notifications = source.slice(source.indexOf("function handleNotification"), source.indexOf("function appendReasoningDelta"));
-  assert.doesNotMatch(serverEvents, /localNotify\(/);
-  assert.equal((notifications.match(/localNotify\(/g) || []).length, 1);
-  assert.match(notifications, /method === "turn\/completed"[\s\S]*localNotify\(/);
-});
 
 test("read-only code preview escapes source and highlights common tokens", () => {
   const { codeLanguage, highlightSource } = appInternals();
@@ -184,6 +177,7 @@ test("composer delivery follows its thread and exposes a dismiss button after su
     "#composerDelivery": { hidden: true, dataset: {} },
     "#composerDeliveryText": { textContent: "" },
     "#composerDeliveryClose": { hidden: true },
+    "#composerDeliveryEdit": { hidden: true },
   };
   const { state, setComposerDelivery, renderComposerDelivery, dismissComposerDelivery } = appInternals(elements);
   state.selectedId = "thread-a";
@@ -216,14 +210,6 @@ test("conversation images open in an in-app viewer that owns browser back", () =
   assert.match(source, /addEventListener\("popstate"[\s\S]+closeImageViewer\(true\)/);
 });
 
-test("Android wrapper notifications bypass web permission and service worker delivery", () => {
-  const source = fs.readFileSync(require.resolve("./app.js"), "utf8");
-  const bridge = source.slice(source.indexOf("function nativeNotificationBridge"), source.indexOf("function renderRawStatus"));
-  const notify = source.slice(source.indexOf("async function localNotify"), source.indexOf("function loadThemePreference"));
-  assert.match(bridge, /__CODEX_REMOTE_NATIVE_NOTIFICATIONS__/);
-  assert.match(bridge, /Android[\s\S]*wv/);
-  assert.match(notify, /if \(nativeBridge\) new Notification/);
-});
 
 test("thread list actions reuse rename and archive operations", () => {
   const source = fs.readFileSync(require.resolve("./app.js"), "utf8");
@@ -232,4 +218,140 @@ test("thread list actions reuse rename and archive operations", () => {
   assert.match(handler, /toggleThreadArchived\(threadId\)/);
   assert.match(source, /data-thread-list-action="rename"/);
   assert.match(source, /data-thread-list-action="archive"/);
+});
+
+function memoryStorage() {
+  const values = new Map();
+  return { getItem: (key) => values.get(key) || null, setItem: (key, value) => values.set(key, value), removeItem: (key) => values.delete(key) };
+}
+
+test("draft text and files stay with their thread and text survives reload", () => {
+  const input = { value: "A draft" };
+  const storage = memoryStorage();
+  const overrides = { clearUploadProgress() {}, renderSelectedFiles() {}, resizeComposer() {} };
+  const app = appInternals({ "#composerInput": input }, { localStorage: storage }, overrides);
+  app.state.selectedId = "a";
+  const file = { name: "a.png" };
+  app.state.composerFiles = [file];
+  app.saveComposerDraft();
+  app.state.selectedId = "b";
+  app.restoreComposerDraft("b");
+  assert.equal(input.value, "");
+  assert.equal(app.state.composerFiles.length, 0);
+  input.value = "B draft";
+  app.saveComposerDraft();
+  app.state.selectedId = "a";
+  app.restoreComposerDraft("a");
+  assert.equal(input.value, "A draft");
+  assert.equal(app.state.composerFiles[0], file);
+  const reloaded = appInternals({ "#composerInput": input }, { localStorage: storage }, overrides);
+  reloaded.restoreComposerDraft("b");
+  assert.equal(input.value, "B draft");
+});
+
+test("lost send response keeps its ID and acknowledgment does not clear another draft", async () => {
+  const storage = memoryStorage();
+  const ids = [];
+  const states = [];
+  const app = appInternals({}, { localStorage: storage, URL: { revokeObjectURL() {} } }, {
+    rpc: async (_method, _params, id) => {
+      ids.push(id);
+      if (ids.length === 1) throw new Error("offline");
+      if (ids.length === 3) throw new app.HttpError("cannot revalidate thread", 403);
+      return { turn: { id: "turn-1", status: "inProgress" } };
+    },
+    setComposerDelivery: (state) => states.push(state),
+    updateActiveTurnControls() {}, scheduleTimelineRender() {},
+  });
+  app.state.selectedId = "b";
+  app.composerDraft("a").text = "newer draft";
+  app.composerDraft("b").text = "another task";
+  const submission = { id: "same-id", method: "turn/start", params: { threadId: "a", input: [] }, text: "submitted text", uploadedPaths: [] };
+  app.saveSubmission("a", submission);
+  assert.equal(await app.deliverComposerSubmission("a", submission), false);
+  assert.equal(app.readSubmission("a").id, "same-id");
+  assert.equal(states.at(-1), "unknown");
+  assert.equal(await app.deliverComposerSubmission("a", app.readSubmission("a")), true);
+  assert.deepEqual(ids, ["same-id", "same-id"]);
+  assert.equal(app.readSubmission("a"), null);
+  assert.equal(app.composerDraft("a").text, "newer draft");
+  assert.equal(app.composerDraft("b").text, "another task");
+  app.saveSubmission("a", submission);
+  assert.equal(await app.deliverComposerSubmission("a", submission), false);
+  assert.equal(app.readSubmission("a").id, "same-id", "a retry's 403 does not prove the first request failed");
+});
+
+test("failed first turn opens the same created thread with a recoverable submission", async () => {
+  const elements = new Proxy({}, { get: (target, key) => target[key] ||= { value: "", hidden: true, textContent: "", dataset: {} } });
+  elements["#newCwd"].value = "/workspace";
+  elements["#newPrompt"].value = "first instruction";
+  const calls = [];
+  let app;
+  app = appInternals(elements, { localStorage: memoryStorage(), crypto: require("node:crypto") }, {
+    setBusy() {}, renderThreadList() {}, rememberWorkspaceThreads() {}, closeDialog() {}, renderSelectedFiles() {},
+    renderNewThreadRecovery() {}, clearUploadProgress() {}, runtimeRangeValue: () => "",
+    turnInputs: async () => { calls.push("upload"); return [{ type: "text", text: "first instruction" }]; },
+    rpc: async (method) => { calls.push(method); return { thread: { id: "created", cwd: "/workspace" } }; },
+    deliverComposerSubmission: async (id) => { calls.push("turn/start"); assert.equal(id, "created"); return false; },
+    selectThread: async (id) => { calls.push("thread/read"); assert.equal(id, "created"); },
+    loadThreads: async () => {},
+  });
+  await app.createThread({ preventDefault() {}, submitter: elements["#createThreadSubmit"] });
+  assert.deepEqual(calls, ["upload", "thread/start", "turn/start", "thread/read"]);
+  assert.equal(app.readSubmission("created").params.threadId, "created");
+  assert.equal(app.composerDraft("created").text, "first instruction");
+  assert.equal(app.readSubmission("new").thread.id, "created");
+});
+
+
+test("history pagination keeps older pages, removes stale head rows, and resets project filter", async () => {
+  const elements = Object.fromEntries(["#loadMoreThreads", "#threadList", "#threadListSummary"].map(key=>[key,{}]));
+  const responses = [
+    {data:[{id:"a"},{id:"b"}],nextCursor:"page-2"},
+    {data:[{id:"b"},{id:"c"}],nextCursor:null},
+    {data:[{id:"d"},{id:"a"}],nextCursor:"new-page-2"},
+    {data:[{id:"match"}],nextCursor:null},
+  ];
+  const queries=[];
+  const {state,loadThreads}=appInternals(elements,{},{rpc:async(method,params)=>{queries.push(params);return responses.shift();},rememberWorkspaceThreads(){},renderThreadList(){}});
+  await loadThreads();await loadThreads(true,true);
+  assert.deepEqual(Array.from(state.threads,thread=>thread.id),["a","b","c"]);
+  assert.equal(queries[1].cursor,"page-2");
+  await loadThreads(false);
+  assert.deepEqual(Array.from(state.threads,thread=>thread.id),["d","a","c"]);
+  state.selectedProject="/other";await loadThreads();
+  assert.equal(queries[3].cwd,"/other");
+  assert.deepEqual(Array.from(state.threads,thread=>thread.id),["match"]);
+  assert.equal(state.nextCursor,null);
+});
+
+test("goal usage uses actual protocol fields and does not invent missing values", () => {
+  const output={};const {state,renderGoalUsage}=appInternals({"#goalUsage":output});
+  state.selectedGoal={tokensUsed:1200,tokenBudget:2000,timeUsedSeconds:90};renderGoalUsage();
+  assert.match(output.textContent,/1,200/);assert.match(output.textContent,/800/);assert.match(output.textContent,/已运行/);
+  state.selectedGoal={objective:"test"};renderGoalUsage();assert.equal(output.textContent,"工作站尚未提供目标用量");
+});
+
+
+test("retired notification subscriptions are removed when the service worker activates", async () => {
+ const handlers = {}, removed = []; let unsubscribed = false, claimed = false;
+ const context = { caches: { keys: async () => [], delete: async name => removed.push(name) }, self: {
+   addEventListener: (name, fn) => { handlers[name] = fn; },
+   registration: { pushManager: { getSubscription: async () => ({ unsubscribe: async () => { unsubscribed = true; } }) } },
+   clients: { claim: async () => { claimed = true; } },
+ } };
+ vm.runInNewContext(fs.readFileSync(require.resolve("./sw.js"), "utf8"), context);
+ let done; handlers.activate({ waitUntil: promise => { done = promise; } }); await done;
+ assert.ok(unsubscribed && claimed); assert.ok(removed.includes("codex-remote-notifications"));
+ assert.equal(handlers.push, undefined); assert.equal(handlers.notificationclick, undefined);
+});
+
+test("timeline keeps reading position after full DOM replacement, including details interaction", () => {
+ let top = 700;
+ const timeline = { querySelectorAll: () => [], scrollHeight: 1800, clientHeight: 500, get scrollTop() { return top; }, set scrollTop(v) { top = v; }, set innerHTML(_) { top = 0; }, scrollTo({top:v}) { top = v; } };
+ const {state,renderTimeline} = appInternals({"#timeline":timeline,"#jumpLatest":{}}, {requestAnimationFrame:fn=>fn()}, { currentAgentRootId:()=>"a",renderTurn:()=>"message" });
+ state.selectedId="a";state.selectedThread={turns:[{items:[{}]}]};
+ renderTimeline();assert.equal(top,700);
+ state.timelineInteractionUntil=Date.now()+10000;top=1300;renderTimeline();assert.equal(top,1300);
+ state.timelineInteractionUntil=0;top=1300;renderTimeline();assert.equal(top,1800);
 });

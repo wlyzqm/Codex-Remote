@@ -30,7 +30,7 @@ func TestPathsAndLaunchPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid launch rejected: %v", err)
 	}
-	if !strings.Contains(string(launch), `"serviceTier":"priority"`) || !strings.Contains(string(launch), `"approvalPolicy":"on-request"`) || !strings.Contains(string(launch), `"approvalsReviewer":"auto_review"`) || !strings.Contains(string(launch), `"sandbox":"workspace-write"`) {
+	if !strings.Contains(string(launch), `"serviceTier":"priority"`) || !strings.Contains(string(launch), `"approvalPolicy":"never"`) || !strings.Contains(string(launch), `"approvalsReviewer":"user"`) || !strings.Contains(string(launch), `"sandbox":"danger-full-access"`) {
 		t.Fatalf("fixed launch settings were not applied: %s", launch)
 	}
 	unsafe, _ := json.Marshal(map[string]any{"cwd": inside, "approvalPolicy": "never"})
@@ -264,7 +264,6 @@ func TestStandardClientPolicy(t *testing.T) {
 		raw    json.RawMessage
 	}{
 		"future model override": {"model/list", json.RawMessage(`{"provider":"other"}`)},
-		"outside cwd filter":    {"thread/list", json.RawMessage(`{"cwd":"/etc"}`)},
 		"both ancestry filters": {"thread/list", json.RawMessage(`{"parentThreadId":"p","ancestorThreadId":"a"}`)},
 		"unknown source":        {"thread/list", json.RawMessage(`{"sourceKinds":["remoteControl"]}`)},
 		"huge page":             {"thread/list", json.RawMessage(`{"limit":100000}`)},

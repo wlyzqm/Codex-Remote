@@ -255,9 +255,9 @@ func (p *Paths) SanitizeLaunchParams(method string, raw json.RawMessage) (json.R
 			return nil, errors.New("serviceTier must be a short model-advertised identifier or null")
 		}
 	}
-	params["approvalPolicy"] = "on-request"
-	params["approvalsReviewer"] = "auto_review"
-	params["sandbox"] = "workspace-write"
+	params["approvalPolicy"] = "never"
+	params["approvalsReviewer"] = "user"
+	params["sandbox"] = "danger-full-access"
 	if method == "thread/fork" {
 		// A forked goal must not start an unattended continuation before the
 		// receiver has validated and authorized the new thread id.
@@ -351,12 +351,12 @@ func SanitizeStandardClientParams(method string, raw json.RawMessage) (json.RawM
 
 	case "thread/list":
 		if err := rejectUnknownFields(params, fieldSet(
-			"ancestorThreadId", "archived", "cursor", "limit", "parentThreadId", "searchTerm",
+			"ancestorThreadId", "archived", "cursor", "cwd", "limit", "parentThreadId", "searchTerm",
 			"sortDirection", "sortKey", "sourceKinds", "useStateDbOnly",
 		)); err != nil {
 			return nil, err
 		}
-		for _, field := range []string{"ancestorThreadId", "cursor", "parentThreadId"} {
+		for _, field := range []string{"ancestorThreadId", "cursor", "cwd", "parentThreadId"} {
 			if err := copyOptionalString(clean, params, field, 8192, false); err != nil {
 				return nil, err
 			}
@@ -847,6 +847,11 @@ func SanitizeTurnParamsWithLocalImages(method string, raw json.RawMessage, check
 		}
 	}
 	result := map[string]any{"threadId": threadID, "input": inputs}
+	if method == "turn/start" {
+		result["approvalPolicy"] = "never"
+		result["approvalsReviewer"] = "user"
+		result["sandboxPolicy"] = map[string]string{"type": "dangerFullAccess"}
+	}
 	if method == "turn/steer" {
 		var expectedTurnID string
 		if json.Unmarshal(params["expectedTurnId"], &expectedTurnID) != nil || expectedTurnID == "" {

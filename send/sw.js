@@ -1,10 +1,10 @@
-const CACHE_NAME = "codex-remote-shell-v40";
+const CACHE_NAME = "codex-remote-shell-v45";
 const SHELL_ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=20260904.1",
+  "./styles.css?v=20260907.3",
   "./markdown.js?v=20260831.2",
-  "./app.js?v=20260904.1",
+  "./app.js?v=20260907.3",
   "./manifest.webmanifest?v=20260831.3",
   "./icon.png?v=20260831.1",
 ];
@@ -17,8 +17,12 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
-      .then(() => self.clients.claim()),
+      .then((keys) => Promise.all(keys.filter((key) => key.startsWith("codex-remote-shell-") && key !== CACHE_NAME).map((key) => caches.delete(key))))
+      .then(async () => {
+        try { await (await self.registration.pushManager?.getSubscription())?.unsubscribe(); } catch {}
+        await caches.delete("codex-remote-notifications");
+        await self.clients.claim();
+      }),
   );
 });
 
@@ -45,26 +49,5 @@ self.addEventListener("fetch", (event) => {
         if (request.mode === "navigate") return caches.match("./index.html");
         throw new Error("offline");
       }),
-  );
-});
-
-self.addEventListener("notificationclick", (event) => {
-  event.notification.close();
-  const target = event.notification.data?.url || new URL("./", self.location).href;
-  event.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (clients) => {
-      const targetUrl = new URL(target, self.location.href);
-      const sameOrigin = targetUrl.origin === self.location.origin;
-      const existing = clients.find((client) => {
-        try { return new URL(client.url).origin === self.location.origin; }
-        catch { return false; }
-      });
-      if (existing) {
-        if (sameOrigin && "navigate" in existing) await existing.navigate(targetUrl.href);
-        return existing.focus();
-      }
-      if (sameOrigin && self.clients.openWindow) return self.clients.openWindow(targetUrl.href);
-      return undefined;
-    }),
   );
 });

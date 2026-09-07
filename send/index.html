@@ -10,7 +10,7 @@
     <link rel="manifest" href="./manifest.webmanifest?v=20260831.3">
     <link rel="icon" href="./icon.png?v=20260831.1" type="image/png" sizes="640x640">
     <link rel="apple-touch-icon" href="./icon.png?v=20260831.1">
-    <link rel="stylesheet" href="./styles.css?v=20260904.1">
+    <link rel="stylesheet" href="./styles.css?v=20260907.3">
     <title>Codex Remote</title>
   </head>
   <body>
@@ -80,6 +80,7 @@
           <button id="requestsButton" class="status-button" type="button">
             <svg><use href="#i-inbox"/></svg><span class="desktop-only">待处理</span><b id="requestCount" hidden>0</b>
           </button>
+          <button id="uploadsButton" class="status-button" type="button" aria-label="管理附件"><svg><use href="#i-file"/></svg><span class="desktop-only">附件</span></button>
           <button id="statusButton" class="connection-pill" type="button" data-state="connecting">
             <svg><use href="#i-status"/></svg><span class="connection-lamp"></span><span id="connectionText">连接中</span>
           </button>
@@ -96,6 +97,7 @@
           </div>
 
           <div id="threadList" class="thread-list" aria-live="polite"></div>
+          <div class="list-pagination"><small id="threadListSummary"></small><button id="loadMoreThreads" class="quiet-button" type="button" hidden>加载更早任务</button></div>
 
         </aside>
 
@@ -121,6 +123,7 @@
                 <button id="goalButton" class="icon-text-button" type="button"><svg><use href="#i-target"/></svg><span>目标</span></button>
                 <button id="threadMenuButton" class="icon-button" type="button" aria-haspopup="menu" aria-expanded="false"><svg><use href="#i-more"/></svg></button>
                 <menu id="threadMenu" class="action-menu" hidden>
+                  <button type="button" data-thread-action="results"><svg><use href="#i-review"/></svg>本轮结果</button>
                   <button type="button" data-thread-action="files"><svg><use href="#i-folder"/></svg>浏览项目文件</button>
                   <button class="mobile-thread-menu-item" type="button" data-thread-action="agents"><svg><use href="#i-agents"/></svg>代理</button>
                   <button class="mobile-thread-menu-item" type="button" data-thread-action="goal"><svg><use href="#i-target"/></svg>目标</button>
@@ -181,11 +184,11 @@
             <button id="jumpLatest" class="jump-latest" type="button" hidden>回到最新 ↓</button>
 
             <footer class="composer-shell">
-              <div id="composerDelivery" class="composer-delivery" role="status" aria-live="polite" hidden><span id="composerDeliveryText"></span><button id="composerDeliveryClose" type="button" aria-label="关闭发送状态" hidden><svg><use href="#i-close"/></svg></button></div>
+              <div id="composerDelivery" class="composer-delivery" role="status" aria-live="polite" hidden><span id="composerDeliveryText"></span><button id="composerDeliveryEdit" class="text-button" type="button" hidden>结束核对</button><button id="composerDeliveryClose" type="button" aria-label="关闭发送状态" hidden><svg><use href="#i-close"/></svg></button></div>
               <form id="composerForm" class="composer-form">
                 <textarea id="composerInput" rows="1" maxlength="20000" placeholder="输入下一步指令…" aria-label="指令内容"></textarea>
                 <div id="composerAttachments" class="attachment-strip" aria-live="polite" hidden></div>
-                <div id="composerUploadProgress" class="upload-progress" role="status" aria-live="polite" hidden><progress max="100" value="0"></progress><span></span></div>
+                <div id="composerUploadProgress" class="upload-progress" role="status" aria-live="polite" hidden><progress max="100" value="0"></progress><span></span><button type="button" class="text-button" data-cancel-upload="composerFiles">取消上传</button></div>
                 <div class="composer-settings" aria-label="下一轮运行设置">
                   <label><span>MODEL</span><select id="composerModel" aria-label="下一轮模型"><option value="">当前模型</option></select></label>
                   <label class="runtime-range"><span>思维强度</span><div class="range-line"><input id="composerEffort" type="range" min="0" max="0" value="0" data-output="composerEffortValue" aria-label="下一轮推理强度"><output id="composerEffortValue">默认</output></div></label>
@@ -230,8 +233,9 @@
             <label id="newEffortField" class="field runtime-range"><span>思维强度</span><div class="range-line"><input id="newEffort" type="range" min="0" max="0" value="0" data-output="newEffortValue"><output id="newEffortValue">默认</output></div></label>
             <label id="newServiceTierField" class="field runtime-range"><span>服务等级</span><div class="range-line"><input id="newServiceTier" type="range" min="0" max="0" value="0" data-output="newServiceTierValue"><output id="newServiceTierValue">默认</output></div></label>
           </section>
-          <div class="field field-wide"><label for="newPrompt"><span>首条指令</span></label><textarea id="newPrompt" name="prompt" rows="5" maxlength="20000" placeholder="描述要 Codex 完成的任务"></textarea><div class="new-message-tools"><label class="secondary-button image-picker"><input id="newThreadFileInput" type="file" multiple hidden><svg><use href="#i-file"/></svg>添加文件</label><small>附件上传完成后再启动会话</small></div><div id="newThreadAttachments" class="attachment-strip" aria-live="polite" hidden></div><div id="newThreadUploadProgress" class="upload-progress" role="status" aria-live="polite" hidden><progress max="100" value="0"></progress><span></span></div></div>
+          <div class="field field-wide"><label for="newPrompt"><span>首条指令</span></label><textarea id="newPrompt" name="prompt" rows="5" maxlength="20000" placeholder="描述要 Codex 完成的任务"></textarea><div class="new-message-tools"><label class="secondary-button image-picker"><input id="newThreadFileInput" type="file" multiple hidden><svg><use href="#i-file"/></svg>添加文件</label><small>附件上传完成后再启动会话</small></div><div id="newThreadAttachments" class="attachment-strip" aria-live="polite" hidden></div><div id="newThreadUploadProgress" class="upload-progress" role="status" aria-live="polite" hidden><progress max="100" value="0"></progress><span></span><button type="button" class="text-button" data-cancel-upload="newThreadFiles">取消上传</button></div></div>
         </div>
+        <p id="newThreadStatus" class="submission-status" role="status" hidden></p>
         <footer class="modal-footer"><button class="text-button" type="button" data-close-dialog>取消</button><button id="createThreadSubmit" class="primary-button" type="submit">创建并发送<svg><use href="#i-chevron"/></svg></button></footer>
       </form>
     </dialog>
@@ -262,7 +266,7 @@
         <div class="modal-body form-grid">
           <label class="field field-wide"><span>目标描述</span><textarea id="goalInput" rows="4" maxlength="4000" placeholder="写下这个会话要持续推进的结果" required></textarea></label>
           <label class="field"><span>状态</span><select id="goalStatus"><option value="active">进行中</option><option value="paused">已暂停</option><option value="blocked">受阻</option><option value="complete">已完成</option></select></label>
-          <label class="field"><span>Token 预算（可选）</span><input id="goalBudget" type="number" inputmode="numeric" min="1" step="1" placeholder="不限制"></label>
+          <p id="goalUsage" class="field field-wide" role="status"></p><label class="field"><span>Token 预算（可选）</span><input id="goalBudget" type="number" inputmode="numeric" min="1" step="1" placeholder="不限制"></label>
         </div>
         <footer class="modal-footer split-footer"><button id="clearGoalButton" class="danger-text-button" type="button">清除目标</button><span></span><button class="text-button" type="button" data-close-dialog>取消</button><button class="primary-button" type="submit">保存目标</button></footer>
       </form>
@@ -276,19 +280,26 @@
           <output id="projectFilesPath">/</output>
           <button id="projectFilesRefresh" class="quiet-button" type="button"><svg><use href="#i-refresh"/></svg>刷新</button>
         </div>
+        <div class="project-selection"><button id="downloadSelection" class="secondary-button" type="button" disabled>打包下载</button><button id="clearFileSelection" class="text-button" type="button" hidden>清空选择</button><small>可跨目录选择文件和文件夹</small></div>
         <div id="projectFilesBody" class="project-files-body">
           <div id="projectFilesList" class="project-files-list" aria-live="polite"></div>
-          <section id="projectFilePreview" class="project-file-preview" hidden>
+          <section id="projectFilePreview" class="project-file-preview wrap-lines" hidden>
             <header><button id="projectFilePreviewBack" class="icon-button" type="button" aria-label="返回文件列表"><svg><use href="#i-arrow-left"/></svg></button><div><strong id="projectFileName"></strong><small id="projectFileMeta"></small></div><a id="projectFileDownload" class="secondary-button" href="#" download><svg><use href="#i-download"/></svg>下载</a></header>
-            <pre><code id="projectFileCode"></code></pre>
+            <div class="preview-controls"><label for="projectPreviewMode">预览方式</label><select id="projectPreviewMode"><option value="code">源码</option><option value="formatted">格式化</option></select><label><input id="projectWrap" type="checkbox" checked>自动换行</label></div>
+            <pre><code id="projectFileCode"></code></pre><div id="projectFileRendered" class="project-file-rendered markdown" hidden></div>
           </section>
         </div>
       </div>
     </dialog>
 
+    <dialog id="resultsDialog" class="modal sheet-modal"><header class="modal-header"><div><span class="eyebrow">RESULTS</span><h2>本轮结果</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header><div id="resultsBody" class="modal-body"></div></dialog>
+
+    <dialog id="uploadsDialog" class="modal sheet-modal"><header class="modal-header"><div><span class="eyebrow">ATTACHMENTS</span><h2>工作站附件</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header><div id="uploadsList" class="modal-body"></div></dialog>
+
     <dialog id="requestsDialog" class="modal sheet-modal request-center-modal">
       <div class="dialog-frame">
         <header class="modal-header"><div><span class="eyebrow">ACTION QUEUE</span><h2>待处理请求 <b id="requestsTitleCount">0</b></h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
+        <details class="request-history"><summary>处理历史</summary><div id="requestHistory"></div></details>
         <div id="requestsList" class="requests-list modal-body"></div>
       </div>
     </dialog>
@@ -301,15 +312,49 @@
       </form>
     </dialog>
 
+    <dialog id="codexSettingsDialog" class="modal sheet-modal codex-settings-modal">
+      <div class="dialog-frame">
+        <header class="modal-header"><div><h2>工作站认证</h2><p id="codexSettingsLocation" class="settings-hint"></p></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
+        <div class="modal-body">
+          <section class="profile-section" aria-label="认证配置管理">
+            <label for="codexProfile">认证配置</label>
+            <div class="profile-picker"><select id="codexProfile"><option value="">工作站当前文件</option></select><button id="readCodexProfile" class="quiet-button" type="button">读取</button><button id="applyCodexProfile" class="secondary-button" type="button">切换</button><button id="deleteCodexProfile" class="quiet-button" type="button">删除</button></div>
+            <p class="settings-hint">MCP、插件和钩子共用工作站设置，切换认证时保留。</p>
+          </section>
+          <section class="config-editor" aria-label="配置编辑器">
+            <div class="config-editor-tabs" role="tablist" aria-label="配置文件">
+              <button id="configFileTab" type="button" role="tab" aria-selected="true" aria-controls="configEditorPanel" data-config-tab="config">config.toml</button>
+              <button id="showCodexAuth" type="button" role="tab" aria-selected="false" aria-controls="authEditorPanel" tabindex="-1" data-config-tab="auth">auth.json</button>
+              <span id="configEditorLanguage">TOML</span>
+            </div>
+            <div id="configEditorPanel" class="code-editor-panel" role="tabpanel" aria-labelledby="configFileTab">
+              <pre id="codexConfigHighlight" aria-hidden="true"></pre><textarea id="codexConfigSource" aria-label="编辑 config.toml" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="soft"></textarea>
+            </div>
+            <div id="authEditorPanel" class="code-editor-panel" role="tabpanel" aria-labelledby="showCodexAuth" hidden>
+              <pre id="codexAuthHighlight" aria-hidden="true"></pre><textarea id="codexAuthSource" aria-label="编辑 auth.json" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="soft"></textarea>
+            </div>
+            <div class="config-editor-status"><span id="configEditorLines">1 行</span><span>自动换行 · UTF-8</span></div>
+          </section>
+          <p id="configEditorHint" class="settings-hint">直接编辑工作站配置。保存前会校验格式并备份旧文件。</p>
+          <section class="profile-save" aria-label="保存认证配置">
+            <label for="codexProfileName">配置名称</label><div class="profile-picker"><input id="codexProfileName" placeholder="例如：官方账户、第三方 API" maxlength="80"><button id="saveCodexProfile" class="quiet-button" type="button">保存配置</button></div>
+          </section>
+        </div>
+        <footer class="config-footer"><p id="codexSettingsMessage" role="status" aria-live="polite" class="settings-hint">保存后下次启动生效，当前任务继续运行。</p><div class="settings-actions"><button id="reloadCodex" class="quiet-button" type="button">手动重载</button><button id="saveCodexFiles" class="primary-button" type="button">保存到工作站</button></div></footer>
+      </div>
+    </dialog>
+
     <dialog id="statusDialog" class="modal sheet-modal status-modal">
       <div class="dialog-frame">
-        <header class="modal-header"><div><span class="eyebrow">NODE TELEMETRY</span><h2>连接状态与设置</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
+        <header class="modal-header"><div><h2>连接状态与设置</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
         <div class="modal-body">
           <section class="status-hero"><span id="statusHeroLamp" class="connection-lamp"></span><div><strong id="statusHeroTitle">正在连接</strong><small id="statusHeroDetail">等待工作站响应</small></div><button id="reconnectButton" class="quiet-button" type="button"><svg><use href="#i-refresh"/></svg>重连</button></section>
-          <section class="status-control theme-control"><div><span class="eyebrow">APPEARANCE</span><strong>界面主题</strong><small>选择保存在当前浏览器，下次打开自动沿用</small></div><select id="themeSelect" aria-label="界面主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></section>
-          <section class="status-control text-size-control"><div><span class="eyebrow">READING</span><strong>正文字号</strong><small>内置 HarmonyOS Sans SC；同步调整消息、推理与操作记录</small></div><label class="text-size-picker" for="bodyTextSize"><input id="bodyTextSize" type="range" min="14" max="18" step="1" value="16" aria-label="正文字号"><output id="bodyTextSizeValue" for="bodyTextSize">16 px</output></label></section>
-          <section><div class="section-title"><span>账户剩余额度</span><button id="refreshRates" class="text-button" type="button">刷新</button></div><div id="rateLimits" class="rate-limits"></div></section>
-          <section class="status-control notification-control"><div><span class="eyebrow">LOCAL ALERTS</span><strong>本地系统通知</strong><small id="notificationStatusText">页面退到后台时，只提醒任务完成；关闭页面后不推送</small></div><div class="notification-actions"><button id="notificationButton" class="quiet-button" type="button"><svg><use href="#i-bell"/></svg><span>启用通知</span></button><button id="testNotificationButton" class="quiet-button" type="button" disabled>测试通知</button></div></section>
+          <h3 class="settings-heading">显示</h3><section class="status-control theme-control"><div><strong>界面主题</strong><small>仅保存在当前浏览器</small></div><select id="themeSelect" aria-label="界面主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></section>
+          <section class="status-control text-size-control"><div><strong>正文字号</strong><small>消息、推理与操作记录共用此字号</small></div><label class="text-size-picker" for="bodyTextSize"><input id="bodyTextSize" type="range" min="14" max="18" step="1" value="16" aria-label="正文字号"><output id="bodyTextSizeValue" for="bodyTextSize">16 px</output></label></section>
+          <section class="settings-section"><div class="section-title"><span>账户剩余额度</span><button id="refreshRates" class="text-button" type="button">刷新</button></div><div id="rateLimits" class="rate-limits"></div></section>
+          <section class="status-control"><div><strong>Codex 工作站认证</strong><small>编辑配置，切换 API 或官方 OAuth 账户</small></div><button id="openCodexSettings" class="quiet-button" type="button">管理配置</button></section>
+          <div id="clientUpdateNotice" hidden role="status">工作站版本已更新，刷新以使用对应客户端。<button id="reloadClientButton" class="text-button" type="button">刷新页面</button></div>
+          <details class="raw-status"><summary>连接与设备诊断</summary><pre id="diagnostics"></pre><button id="copyDiagnostics" class="quiet-button" type="button">复制诊断</button></details>
           <details class="raw-status"><summary>原始后端状态</summary><pre id="rawStatus">暂无数据</pre></details>
           <button id="logoutButton" class="logout-button" type="button">退出当前设备</button>
         </div>
@@ -325,6 +370,6 @@
 
     <div id="toastRegion" class="toast-region" role="status" aria-live="polite"></div>
     <script src="./markdown.js?v=20260831.2" defer></script>
-    <script src="./app.js?v=20260904.1" defer></script>
+    <script src="./app.js?v=20260907.3" defer></script>
   </body>
 </html>

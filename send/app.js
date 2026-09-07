@@ -8,6 +8,8 @@
   const SUBAGENT_SOURCE_KINDS = ["subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther"];
   const THEME_STORAGE_KEY = "codex-remote:theme";
   const TEXT_SIZE_STORAGE_KEY = "codex-remote:text-size";
+  const DRAFT_STORAGE_KEY = "codex-remote:draft:";
+  const SUBMISSION_STORAGE_KEY = "codex-remote:submission:";
 
   const state = {
     authenticated: false,
@@ -21,9 +23,22 @@
     selectedGoal: null,
     activeTurnId: null,
     selectedRefreshBusy: false,
+    refreshTimer: null,
+    lastListRefresh: 0,
+    lastSyncAt: 0,
+    syncError: false,
+    threadListSequence: 0,
+    nextCursor: null,
+    loadingMore: false,
+    timelineLimit: 80,
+    requestHistory: [],
+    draftDB: null,
     selectSequence: 0,
     pendingRequests: new Map(),
     composerDeliveries: new Map(),
+    composerDrafts: new Map(),
+    sendingThreads: new Set(),
+    creatingThread: false,
     currentRequestKey: null,
     eventSource: null,
     reconnectTimer: null,
@@ -50,7 +65,6 @@
     composerSettingsThreadId: null,
     composerDirty: { model: false, effort: false, serviceTier: false, personality: false },
     serviceWorkerRegistration: null,
-    notificationsEnabled: false,
     theme: "system",
     textSize: 16,
     workspaceDirectories: [],
@@ -63,6 +77,9 @@
     directoryParent: "",
     composerFiles: [],
     newThreadFiles: [],
+    projectFileSelection: new Set(),
+    projectFileSource: "",
+    projectPreviewSequence: 0,
     projectFilesPath: "",
     projectFilesParent: "",
   };
@@ -82,14 +99,11 @@
   document.addEventListener("DOMContentLoaded", bootstrap);
 
   async function bootstrap() {
-    try { state.notificationsEnabled = localStorage.getItem("codex-remote:local-notifications") === "enabled"; }
-    catch { state.notificationsEnabled = false; }
     loadThemePreference();
     loadTextSizePreference();
     loadStoredWorkspaceDirectories();
     bindEvents();
     registerServiceWorker();
-    renderNotificationControl();
     try {
       const session = await request("/api/session");
       if (session && session.authenticated === false) throw new HttpError("登录已失效", 401, session);
@@ -116,7 +130,7 @@
     $("#projectSelect").addEventListener("change", (event) => {
       state.selectedProject = event.target.value;
       try { localStorage.setItem("codex-remote:selected-project", state.selectedProject); } catch {}
-      renderThreadList();
+      loadThreads(true).catch(() => {});
     });
     $("#archivedToggle").addEventListener("change", (event) => {
       state.archived = event.target.checked;
@@ -141,10 +155,33 @@
     $("#projectFilesBack").addEventListener("click", () => loadProjectDirectory(state.projectFilesParent));
     $("#projectFilesRefresh").addEventListener("click", () => loadProjectDirectory(state.projectFilesPath));
     $("#projectFilesList").addEventListener("click", handleProjectFileClick);
+    $("#projectFilesList").addEventListener("change", event => {
+      const box = event.target.closest("[data-project-select]");
+      if (!box) return;
+      if (box.checked) state.projectFileSelection.add(box.dataset.projectSelect);
+      else state.projectFileSelection.delete(box.dataset.projectSelect);
+      renderFileSelection();
+    });
+    $("#downloadSelection").addEventListener("click", downloadFileSelection);
+    $("#clearFileSelection").addEventListener("click", () => { state.projectFileSelection.clear(); loadProjectDirectory(state.projectFilesPath); });
+    $("#projectPreviewMode").addEventListener("change", renderProjectPreview);
+    $("#projectWrap").addEventListener("change", () => $("#projectFilePreview").classList.toggle("wrap-lines", $("#projectWrap").checked));
     $("#projectFilePreviewBack").addEventListener("click", closeProjectFilePreview);
 
+    $("#loadMoreThreads").addEventListener("click", () => loadThreads(true, true).catch(() => {}));
+    $("#reloadClientButton").addEventListener("click", () => location.reload());
+    $("#copyDiagnostics").addEventListener("click", () => copyText(diagnosticText(), "已复制连接诊断"));
+    $("#resultsBody").addEventListener("click", event => { const button = event.target.closest("[data-result-path]"); if (button) openProjectPath(button.dataset.resultPath); });
+    $("#uploadsButton").addEventListener("click", openUploads);
+    $("#requestHistory").addEventListener("click", event => { const button = event.target.closest("[data-history-thread]"); if (button) { closeDialog($("#requestsDialog")); selectThread(button.dataset.historyThread); } });
+    $("#uploadsList").addEventListener("click", handleUploadAction);
+    $$("[data-cancel-upload]").forEach(button => button.addEventListener("click", () => {
+      state[button.dataset.cancelUpload].forEach(file => file.xhr?.abort());
+    }));
+    $("#composerAttachments").addEventListener("click", previewSelectedFile);
+    $("#newThreadAttachments").addEventListener("click", previewSelectedFile);
     $("#composerForm").addEventListener("submit", sendComposer);
-    $("#composerInput").addEventListener("input", resizeComposer);
+    $("#composerInput").addEventListener("input", () => { resizeComposer(); saveComposerDraft(); });
     $("#composerFileInput").addEventListener("change", (event) => addSelectedFiles(event.target, "composerFiles"));
     $("#newThreadFileInput").addEventListener("change", (event) => addSelectedFiles(event.target, "newThreadFiles"));
     $("#composerAttachments").addEventListener("click", (event) => removeSelectedFile(event, "composerFiles"));
@@ -190,6 +227,7 @@
     $("#subagentPreviewTimeline").addEventListener("error", handleArtifactError, true);
     $("#returnToParentButton").addEventListener("click", returnToAgentParent);
     $("#composerDeliveryClose").addEventListener("click", dismissComposerDelivery);
+    $("#composerDeliveryEdit").addEventListener("click", releaseUncertainSubmission);
     $("#subagentPromptButton").addEventListener("click", createSubagentPromptTemplate);
     $("#subagentModelPreference").addEventListener("change", persistSubagentPreferences);
     $("#subagentEffortPreference").addEventListener("change", persistSubagentPreferences);
@@ -211,12 +249,41 @@
     $("#requestForm").addEventListener("submit", submitStructuredRequest);
     $$('[data-close-request]').forEach((button) => button.addEventListener("click", () => closeDialog($("#requestDialog"))));
 
+    $("#openCodexSettings").addEventListener("click", async () => {
+      closeDialog($("#statusDialog"));
+      showDialog($("#codexSettingsDialog"));
+      selectConfigTab("config");
+      $("#codexSettingsMessage").textContent = "正在读取工作站配置…";
+      try { await loadCodexSettings(); $("#codexSettingsMessage").textContent = "保存后下次启动 Codex 生效，当前任务继续运行。"; }
+      catch (error) { $("#codexSettingsMessage").textContent = readableError(error); }
+    });
+    $("#readCodexProfile").addEventListener("click", async () => {
+      if (state.codexSettingsDirty && !confirm("重新读取将放弃尚未保存的编辑，继续？")) return;
+      try { await loadCodexSettings($("#codexProfile").value); } catch (error) { $("#codexSettingsMessage").textContent = readableError(error); }
+    });
+    for (const [id, action] of [["saveCodexFiles", "save"], ["saveCodexProfile", "profile"], ["applyCodexProfile", "apply"], ["deleteCodexProfile", "delete"], ["reloadCodex", "reload"]]) $("#" + id).addEventListener("click", () => codexSettingsAction(action));
+    for (const id of ["codexConfigSource", "codexAuthSource"]) {
+      const input = $("#" + id);
+      input.addEventListener("input", () => { state.codexSettingsDirty = true; renderConfigEditor(id); });
+      input.addEventListener("scroll", () => { const highlight = $("#" + id.replace("Source", "Highlight")); highlight.scrollTop = input.scrollTop; highlight.scrollLeft = input.scrollLeft; });
+    }
+    $$("[data-config-tab]").forEach(button => {
+      button.addEventListener("click", () => selectConfigTab(button.dataset.configTab));
+      button.addEventListener("keydown", event => { if (["ArrowLeft", "ArrowRight"].includes(event.key)) { event.preventDefault(); const next = button.dataset.configTab === "config" ? "auth" : "config"; selectConfigTab(next); $(`[data-config-tab="${next}"]`).focus(); } });
+    });
+    $("#codexSettingsDialog").addEventListener("cancel", event => { event.preventDefault(); closeDialog($("#codexSettingsDialog")); });
+    $("#codexSettingsDialog").addEventListener("close", () => {
+      state.codexSettingsReadSequence = (state.codexSettingsReadSequence || 0) + 1;
+      state.codexSettingsDirty = false;
+      $("#codexConfigSource").value = ""; $("#codexAuthSource").value = "";
+      $("#codexConfigHighlight").replaceChildren(); $("#codexAuthHighlight").replaceChildren();
+      selectConfigTab("config");
+      state.codexSettingsRevision = "";
+    });
     $("#statusButton").addEventListener("click", openStatusDialog);
     $("#refreshRates").addEventListener("click", refreshRateLimits);
     $("#reconnectButton").addEventListener("click", reconnectNow);
     $("#logoutButton").addEventListener("click", logout);
-    $("#notificationButton").addEventListener("click", toggleLocalNotifications);
-    $("#testNotificationButton").addEventListener("click", testLocalNotification);
     $("#themeSelect").addEventListener("change", (event) => setThemePreference(event.target.value));
     $("#bodyTextSize").addEventListener("input", (event) => setTextSizePreference(event.target.value));
 
@@ -249,9 +316,11 @@
       updateConnectivity();
     });
     document.addEventListener("visibilitychange", () => {
+      clearTimeout(state.refreshTimer);
       if (document.hidden || !state.authenticated) return;
       if (!state.sseConnected) reconnectNow();
       refreshSelectedThread(true);
+      scheduleStateRefresh();
     });
   }
 
@@ -259,7 +328,6 @@
     if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
     try {
       state.serviceWorkerRegistration = await navigator.serviceWorker.register("./sw.js", { scope: "./" });
-      renderNotificationControl();
     } catch (error) {
       console.info("Service Worker 未启用", error);
     }
@@ -299,10 +367,10 @@
     }
   }
 
-  async function rpc(method, params = {}) {
+  async function rpc(method, params = {}, clientRequestId = "") {
     const payload = await request("/api/rpc", {
       method: "POST",
-      body: JSON.stringify({ method, params }),
+      body: JSON.stringify({ method, params, ...(clientRequestId ? { clientRequestId } : {}) }),
     });
     if (payload?.error) {
       const message = payload.error.message || payload.error.data?.message || payload.error;
@@ -341,6 +409,7 @@
 
   async function enterApp() {
     state.authenticated = true;
+    scheduleStateRefresh();
     $("#bootView").hidden = true;
     $("#loginView").hidden = true;
     $("#appView").hidden = false;
@@ -355,12 +424,15 @@
     const failed = settled.filter((entry) => entry.status === "rejected");
     if (failed.length) toast(`有 ${failed.length} 项初始数据暂未加载`, "warning");
     syncWorkspaceDirectories(false).catch(() => {});
+    if (readSubmission("new")) toast("有一次任务创建待确认，可从“新建”继续核对", "warning", 7000);
     const linkedThreadId = new URLSearchParams(location.hash.slice(1)).get("thread");
     if (linkedThreadId) selectThread(linkedThreadId, { silent: true });
   }
 
   function showLogin(message = "") {
+    saveComposerDraft();
     state.authenticated = false;
+    clearTimeout(state.refreshTimer);
     disconnectEvents();
     state.lastEventId = "";
     state.eventInstanceId = "";
@@ -374,6 +446,7 @@
   }
 
   async function logout() {
+    saveComposerDraft();
     const button = $("#logoutButton");
     setBusy(button, true, "正在退出…");
     try {
@@ -531,24 +604,46 @@
     if (!supportsPersonality) $("#composerPersonality").value = "none";
   }
 
-  async function loadThreads() {
-    $("#threadList").innerHTML = '<div class="list-skeleton"><i></i><i></i><i></i></div>';
+  async function loadThreads(feedback = true, more = false) {
+    const queryKey = JSON.stringify([state.archived, state.selectedProject]);
+    if (state.loadingMore && (!feedback || more)) return;
+    if (more && queryKey !== state.listQueryKey) more = false;
+    if (more && !state.nextCursor) return;
+    state.loadingMore = more;
+    const sequence = ++state.threadListSequence;
+    $("#loadMoreThreads").disabled = true;
+    if (feedback && !more) $("#threadList").innerHTML = '<div class="list-skeleton"><i></i><i></i><i></i></div>';
     const params = {
-      cursor: null,
-      limit: 200,
+      cursor: more ? state.nextCursor : null,
+      limit: 100,
+      cwd: state.selectedProject || null,
       sortKey: "updated_at",
       sortDirection: "desc",
       archived: state.archived,
     };
     try {
       const result = await rpc("thread/list", params);
-      state.threads = normalizeArray(result, ["data", "threads"]);
+      if (sequence !== state.threadListSequence) return;
+      state.lastListRefresh = Date.now();
+      const page = normalizeArray(result, ["data", "threads"]);
+      const keepTail = (more || !feedback) && state.listQueryKey === queryKey;
+      const tail = keepTail ? state.threads.filter(thread => more || !state.headThreadIds?.has(thread.id)) : [];
+      state.threads = [...new Map((more ? [...tail, ...page] : [...page, ...tail]).map(thread => [thread.id, thread])).values()];
+      if (!keepTail || more) state.nextCursor = result.nextCursor || null;
+      if (!more) state.headThreadIds = new Set(page.map(thread => thread.id));
+      state.listQueryKey = queryKey;
+      $("#loadMoreThreads").hidden = !state.nextCursor;
+      $("#threadListSummary").textContent = `已加载 ${state.threads.length} 个任务${state.nextCursor ? " · 还有更早记录" : " · 已全部加载"}`;
       rememberWorkspaceThreads(state.threads);
       renderThreadList();
     } catch (error) {
+      if (!feedback || sequence !== state.threadListSequence) throw error;
+      if (more) { toast(readableError(error), "error"); throw error; }
       $("#threadList").innerHTML = `<div class="list-message">${escapeHtml(readableError(error))}<br><button class="text-button" type="button" data-retry-threads>重新加载</button></div>`;
       $("[data-retry-threads]")?.addEventListener("click", () => loadThreads());
       throw error;
+    } finally {
+      if (sequence === state.threadListSequence) { state.loadingMore = false; $("#loadMoreThreads").disabled = false; }
     }
   }
 
@@ -556,15 +651,8 @@
     const list = $("#threadList");
     const projects = [...new Set(state.threads.map((thread) => pathText(thread.cwd)).filter(Boolean))];
     const projectSelect = $("#projectSelect");
-    if (!projects.includes(state.selectedProject)) {
-      let stored = "";
-      try { stored = localStorage.getItem("codex-remote:selected-project") || ""; } catch {}
-      state.selectedProject = projects.includes(stored) ? stored : projects[0] || "";
-    }
-    projectSelect.innerHTML = projects.length
-      ? projects.map((path) => `<option value="${escapeHtml(path)}"${path === state.selectedProject ? " selected" : ""}>${escapeHtml(path)}</option>`).join("")
-      : '<option value="">暂无项目</option>';
-    const threads = state.threads.filter((thread) => pathText(thread.cwd) === state.selectedProject);
+    projectSelect.innerHTML = '<option value="">全部项目</option>' + [...new Set([...projects, ...state.workspaceDirectories, state.selectedProject].filter(Boolean))].map(path => `<option value="${escapeHtml(path)}"${path === state.selectedProject ? " selected" : ""}>${escapeHtml(path)}</option>`).join("");
+    const threads = state.threads.filter(thread => !state.selectedProject || pathText(thread.cwd) === state.selectedProject);
     if (!state.threads.length) {
       list.innerHTML = `<div class="list-message">${state.archived ? "归档区为空" : "还没有会话"}</div>`;
       return;
@@ -607,6 +695,7 @@
   }
 
   async function selectThread(threadId, options = {}) {
+    saveComposerDraft();
     if (!options.preserveAgentNavigation) {
       state.agentRootId = threadId;
       state.agentTrail = [];
@@ -614,6 +703,11 @@
     }
     const sequence = ++state.selectSequence;
     state.selectedId = threadId;
+    state.timelineLimit = 80;
+    state.projectFileSelection.clear();
+    restoreComposerDraft(threadId);
+    state.lastSyncAt = 0;
+    state.syncError = false;
     state.selectedThread = state.threads.find((thread) => thread.id === threadId) || state.subagents.get(threadId)?.thread || null;
     if (state.selectedThread?.cwd) state.selectedProject = pathText(state.selectedThread.cwd);
     state.selectedRuntime = null;
@@ -631,6 +725,9 @@
         rpc("thread/goal/get", { threadId }).catch(() => null),
       ]);
       if (sequence !== state.selectSequence) return;
+      state.lastSyncAt = Date.now();
+      state.syncError = false;
+      updateConnectivity();
       state.selectedThread = mergeLiveThreadSnapshot(state.selectedThread, threadResult?.thread || threadResult);
       if (state.selectedThread?.cwd) state.selectedProject = pathText(state.selectedThread.cwd);
       state.selectedRuntime = state.selectedThread?.runtime || {};
@@ -662,6 +759,9 @@
       if (state.selectedId !== threadId) return;
       const latest = result?.thread || result;
       if (!latest) return;
+      state.lastSyncAt = Date.now();
+      state.syncError = false;
+      updateConnectivity();
       const merged = mergeLiveThreadSnapshot(state.selectedThread, latest);
       if (!force && threadProgressKey(merged) === threadProgressKey(state.selectedThread)) return;
       const previousRuntime = JSON.stringify(state.selectedRuntime || {});
@@ -679,10 +779,82 @@
       renderThreadDetail(false);
       scheduleTimelineRender(false);
     } catch (error) {
+      if (state.selectedId === threadId) {
+        state.syncError = true;
+        updateConnectivity();
+      }
       if (force) console.info("会话实时同步暂时失败", error);
     } finally {
       state.selectedRefreshBusy = false;
     }
+  }
+
+  function scheduleStateRefresh() {
+    clearTimeout(state.refreshTimer);
+    if (!state.authenticated || document.hidden) return;
+    // ponytail: bounded snapshot polling covers other Codex clients; switch to
+    // revision-based reads when the backend exposes a reliable revision.
+    state.refreshTimer = setTimeout(async () => {
+      if (!state.authenticated || document.hidden || !navigator.onLine) return scheduleStateRefresh();
+      await Promise.allSettled([
+        refreshSelectedThread(),
+        Date.now() - state.lastListRefresh >= 15000 ? loadThreads(false) : Promise.resolve(),
+      ]);
+      scheduleStateRefresh();
+    }, state.activeTurnId ? 3000 : 10000);
+  }
+
+  function composerDraft(threadId) {
+    if (!state.composerDrafts.has(threadId)) {
+      let text = "";
+      try { text = localStorage.getItem(DRAFT_STORAGE_KEY + threadId) || ""; } catch {}
+      state.composerDrafts.set(threadId, { text, files: [] });
+    }
+    return state.composerDrafts.get(threadId);
+  }
+
+  function persistComposerDraft(threadId) {
+    const draft = composerDraft(threadId);
+    try {
+      if (draft.text) localStorage.setItem(DRAFT_STORAGE_KEY + threadId, draft.text);
+      else localStorage.removeItem(DRAFT_STORAGE_KEY + threadId);
+    } catch {
+      toast("浏览器未能保存草稿，请勿关闭页面", "warning");
+    }
+  }
+
+  function saveComposerDraft() {
+    if (!state.selectedId) return;
+    const draft = composerDraft(state.selectedId);
+    draft.text = $("#composerInput").value;
+    draft.files = state.composerFiles;
+    persistComposerDraft(state.selectedId);
+  }
+
+  function restoreComposerDraft(threadId) {
+    const draft = composerDraft(threadId);
+    $("#composerInput").value = draft.text;
+    state.composerFiles = draft.files;
+    restoreDraftFiles(threadId);
+    clearUploadProgress("composerFiles");
+    renderSelectedFiles("composerFiles");
+    resizeComposer();
+    if (readSubmission(threadId)) setComposerDelivery("unknown", "上次发送尚待确认，点击“核对发送”获取结果", threadId);
+  }
+
+  function readSubmission(key) {
+    try { return JSON.parse(localStorage.getItem(SUBMISSION_STORAGE_KEY + key) || "null"); }
+    catch { return null; }
+  }
+
+  function saveSubmission(key, value) {
+    if (value) localStorage.setItem(SUBMISSION_STORAGE_KEY + key, JSON.stringify(value));
+    else localStorage.removeItem(SUBMISSION_STORAGE_KEY + key);
+  }
+
+  function submissionIsUncertain(error) {
+    // A failed retry's auth/path validation says nothing about the first send.
+    return !(error instanceof HttpError) || (error.status !== 422 && error.payload?.error?.code !== "submission_not_sent");
   }
 
   function renderThreadDetail(loading = false) {
@@ -770,7 +942,8 @@
 
   function writeComposerDraft(text, message) {
     const input = $("#composerInput");
-    input.value = text;
+    input.value = [input.value.trimEnd(), text].filter(Boolean).join("\n\n");
+    saveComposerDraft();
     resizeComposer();
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
@@ -1299,16 +1472,25 @@
       container.innerHTML = '<div class="timeline-empty">此会话还没有消息。可以从下方发送第一条指令。</div>';
       return;
     }
-    container.innerHTML = `<div class="timeline-inner">${turns.map((turn, index) => renderTurn(turn, index)).join("")}</div>`;
+    const totalItems = turns.reduce((sum, turn) => sum + (turn.items?.length || 0), 0);
+    let skip = Math.max(0, totalItems - state.timelineLimit);
+    const hiddenItems = skip;
+    const visible = turns.map((turn, index) => {
+      const count = turn.items?.length || 0;
+      if (skip >= count && count) { skip -= count; return ""; }
+      const sliced = skip ? { ...turn, items: turn.items.slice(skip) } : turn;
+      skip = 0;
+      return renderTurn(sliced, index);
+    }).join("");
+    container.innerHTML = `<div class="timeline-inner">${hiddenItems ? `<button type="button" class="secondary-button load-older" data-load-older>加载更早消息 · 还有 ${hiddenItems} 项</button>` : ""}${visible}</div>`;
     $$("details.item[data-item-id]", container).forEach((details) => { details.open = openDetails.has(details.dataset.itemId); });
     requestAnimationFrame(() => {
       $$('[data-artifact-image], [data-message-image]', container).forEach((image) => {
         if (image.complete && image.naturalWidth === 0) handleArtifactError({ target: image });
       });
     });
-    if (nearBottom) requestAnimationFrame(() => scrollTimelineToEnd(false));
-    else if (userInteracting) requestAnimationFrame(() => { container.scrollTop = previousScrollTop; updateJumpLatest(); });
-    else updateJumpLatest();
+    if (nearBottom) scrollTimelineToEnd(false);
+    else { container.scrollTop = previousScrollTop; updateJumpLatest(); }
   }
 
   function renderTurn(turn, index) {
@@ -1454,7 +1636,7 @@
     const source = image.currentSrc || image.src;
     if (!source) return;
     const dialog = $("#imageViewerDialog");
-    const title = $("figcaption span, figcaption", image.closest("figure"))?.textContent?.trim() || image.alt || "图像预览";
+    const title = (image.closest("figure") ? $("figcaption span, figcaption", image.closest("figure")) : null)?.textContent?.trim() || image.alt || "图像预览";
     $("#imageViewerImage").src = source;
     $("#imageViewerImage").alt = image.alt || "图像预览";
     $("#imageViewerTitle").textContent = title;
@@ -1599,6 +1781,14 @@
 
   function handleTimelineClick(event) {
     if (openClickedImage(event)) return;
+    if (event.target.closest("[data-load-older]")) {
+      const container = $("#timeline"), height = container.scrollHeight, top = container.scrollTop;
+      state.timelineLimit += 80;
+      state.timelineInteractionUntil = Date.now() + 1000;
+      renderTimeline(false);
+      requestAnimationFrame(() => { container.scrollTop = top + container.scrollHeight - height; });
+      return;
+    }
     if (event.target.closest("details > summary")) state.timelineInteractionUntil = Date.now() + 5000;
     const open = event.target.closest("[data-open-agent-thread]");
     if (open) {
@@ -1640,9 +1830,13 @@
 
   function updateActiveTurnControls() {
     const active = Boolean(state.activeTurnId);
+    const sending = state.sendingThreads.has(state.selectedId);
+    const pending = readSubmission(state.selectedId);
     $("#interruptMenuButton").hidden = !active;
-    $("#sendLabel").textContent = active ? "发送引导" : "发送";
-    $("#composerHint").textContent = active ? "当前消息将 steer 正在进行的 turn" : "CTRL + ENTER 快速发送";
+    $("#sendButton").disabled = sending;
+    $("#sendButton").setAttribute("aria-busy", String(sending));
+    $("#sendLabel").textContent = sending ? "发送中…" : pending ? "核对发送" : active ? "发送引导" : "发送";
+    $("#composerHint").textContent = pending ? "核对上次提交，当前草稿不会被重新发送" : state.composerFiles.length ? "草稿与附件按任务保存" : active ? "追加指令给当前任务 · Ctrl + Enter 发送" : "草稿按任务保存 · Ctrl + Enter 发送";
     $("#composerModel").disabled = active;
     $("#composerEffort").disabled = active;
     $("#composerServiceTier").disabled = active || $("#composerServiceTierField").classList.contains("field-disabled");
@@ -1668,11 +1862,20 @@
     container.dataset.state = delivery?.state || "";
     $("#composerDeliveryText").textContent = delivery?.message || "";
     $("#composerDeliveryClose").hidden = !["accepted", "error"].includes(delivery?.state);
+    $("#composerDeliveryEdit").hidden = delivery?.state !== "unknown";
   }
 
   function dismissComposerDelivery() {
     if (state.selectedId) state.composerDeliveries.delete(state.selectedId);
     renderComposerDelivery();
+  }
+
+  function releaseUncertainSubmission() {
+    if (!state.selectedId || state.sendingThreads.has(state.selectedId)) return;
+    if (!window.confirm("请先检查会话中是否已有这条指令。结束核对只恢复编辑，不会重发；之后再次发送可能重复执行。")) return;
+    saveSubmission(state.selectedId, null);
+    dismissComposerDelivery();
+    updateActiveTurnControls();
   }
 
   function reconcileComposerDelivery(threadId, thread) {
@@ -1688,97 +1891,117 @@
 
   async function sendComposer(event) {
     event.preventDefault();
-    if (!state.selectedId) return;
-    const input = $("#composerInput");
-    const submittedValue = input.value;
-    const text = submittedValue.trim();
-    if (!text && !state.composerFiles.length) return;
     const threadId = state.selectedId;
-    const targetThread = state.selectedThread;
-    const turnId = state.activeTurnId;
-    const submittedFiles = [...state.composerFiles];
-    const submittedSettings = {
-      dirty: { ...state.composerDirty },
-      model: $("#composerModel").value,
-      effort: runtimeRangeValue($("#composerEffort")),
-      serviceTier: runtimeRangeValue($("#composerServiceTier")),
-      personality: !$("#composerPersonalityField").hidden && !$("#composerPersonality").disabled ? $("#composerPersonality").value : "",
-    };
-    const button = $("#sendButton");
-    const steering = Boolean(turnId);
-    const attachmentCount = submittedFiles.length;
-    setBusy(button, true, steering ? "引导中…" : "发送中…");
-    setComposerDelivery("sending", attachmentCount ? `正在上传 ${attachmentCount} 个附件并提交给 Remote…` : steering ? "正在提交引导给 Remote…" : "正在提交消息给 Remote…", threadId);
+    if (!threadId || state.sendingThreads.has(threadId)) return;
+    saveComposerDraft();
+    const draft = composerDraft(threadId);
+    let submission = readSubmission(threadId);
+    if (!submission && !draft.text.trim() && !draft.files.length) return;
+    state.sendingThreads.add(threadId);
+    updateActiveTurnControls();
     try {
-      const inputs = await turnInputs(text, submittedFiles, (loaded, total, name) => renderUploadProgress("composerFiles", loaded, total, name));
-      let result;
-      if (steering) {
-        const pendingId = `remote-steer-${Date.now()}`;
-        const targetTurn = targetThread?.turns?.find((turn) => turn.id === turnId);
-        if (!targetTurn) throw new Error("当前运行中的 Turn 已结束，请刷新后重试");
-        if (!Array.isArray(targetTurn.items)) targetTurn.items = [];
-        const pending = { id: pendingId, type: "userMessage", content: inputs, remotePending: true, deliveryState: "sending" };
-        targetTurn.items.push(pending);
-        setComposerDelivery("sending", "正在提交引导给 Remote…", threadId, { pending: { type: "userMessage", content: inputs }, pendingId, turnId });
-        if (state.selectedId === threadId) scheduleTimelineRender(true);
-        try {
-          result = await rpc("turn/steer", {
-            threadId,
-            expectedTurnId: turnId,
-            input: inputs,
-          });
-          const queued = findItemInThread(targetThread, pendingId);
-          if (queued) {
-            queued.deliveryState = "queued";
-            if (state.composerDeliveries.get(threadId)?.state !== "accepted") setComposerDelivery("queued", attachmentCount ? `${attachmentCount} 个附件已上传至 Remote，等待 Codex 接收引导` : "Remote 已接收引导，等待 Codex 处理", threadId);
-            if (state.selectedId === threadId) scheduleTimelineRender(false);
-          }
-        } catch (error) {
-          targetTurn.items = (targetTurn.items || []).filter((item) => item.id !== pendingId);
-          if (state.selectedId === threadId) scheduleTimelineRender(false);
-          throw error;
-        }
-      } else {
-        const params = { threadId, input: inputs };
-        if (submittedSettings.dirty.model && submittedSettings.model) params.model = submittedSettings.model;
-        if (submittedSettings.dirty.effort) params.effort = submittedSettings.effort || null;
-        if (submittedSettings.dirty.serviceTier) params.serviceTier = submittedSettings.serviceTier === "__default__" ? null : submittedSettings.serviceTier;
-        if (submittedSettings.dirty.personality && submittedSettings.personality) params.personality = submittedSettings.personality;
-        result = await rpc("turn/start", params);
-        const runtime = {
-          ...(targetThread?.runtime || {}),
-          ...(params.model ? { model: params.model } : {}),
-          ...(Object.prototype.hasOwnProperty.call(params, "effort") ? { effort: params.effort || "" } : {}),
-          ...(Object.prototype.hasOwnProperty.call(params, "serviceTier") ? { serviceTier: params.serviceTier || "" } : {}),
-          ...(params.personality ? { personality: params.personality } : {}),
+      if (!submission) {
+        const text = draft.text;
+        const files = [...draft.files];
+        const turnId = state.activeTurnId;
+        const settings = {
+          dirty: { ...state.composerDirty }, model: $("#composerModel").value,
+          effort: runtimeRangeValue($("#composerEffort")), serviceTier: runtimeRangeValue($("#composerServiceTier")),
+          personality: !$("#composerPersonalityField").hidden ? $("#composerPersonality").value : "",
         };
-        if (targetThread) targetThread.runtime = runtime;
-        const turn = result?.turn || result;
-        if (turn?.id && state.selectedId === threadId) {
-          state.selectedRuntime = runtime;
-          state.composerDirty = { model: false, effort: false, serviceTier: false, personality: false };
-          upsertTurn(turn);
-          state.activeTurnId = turn.id;
+        setComposerDelivery("sending", files.length ? "正在上传附件…" : "正在发送…", threadId);
+        const inputs = await turnInputs(text.trim(), files, (loaded, total, name) => {
+          if (state.selectedId === threadId) renderUploadProgress("composerFiles", loaded, total, name);
+        }, threadId);
+        const params = { threadId, input: inputs };
+        if (turnId) params.expectedTurnId = turnId;
+        else {
+          if (settings.dirty.model && settings.model) params.model = settings.model;
+          if (settings.dirty.effort) params.effort = settings.effort || null;
+          if (settings.dirty.serviceTier) params.serviceTier = settings.serviceTier === "__default__" ? null : settings.serviceTier;
+          if (settings.dirty.personality && settings.personality) params.personality = settings.personality;
         }
-        setComposerDelivery("accepted", attachmentCount ? `${attachmentCount} 个附件与消息已被 Codex 接收` : "Codex 已接收消息，任务开始运行", threadId);
+        submission = {
+          id: crypto.randomUUID(), method: turnId ? "turn/steer" : "turn/start", params, text,
+          uploadedPaths: files.map((file) => file.uploaded?.path).filter(Boolean),
+        };
+        saveSubmission(threadId, submission);
       }
-      if (input.value === submittedValue) input.value = "";
-      state.composerFiles = state.composerFiles.filter((file) => !submittedFiles.includes(file));
-      releaseSelectedFiles(submittedFiles);
-      if (state.selectedId === threadId) {
-        renderSelectedFiles("composerFiles");
-        closeComposerSettings();
-        resizeComposer();
-        updateActiveTurnControls();
-        scheduleTimelineRender(true);
-      }
+      await deliverComposerSubmission(threadId, submission);
     } catch (error) {
-      setComposerDelivery("error", `发送失败：${readableError(error)}`, threadId);
+      setComposerDelivery("error", `尚未发送：${readableError(error)}`, threadId);
       toast(readableError(error), "error");
     } finally {
-      clearUploadProgress("composerFiles");
-      setBusy(button, false);
+      state.sendingThreads.delete(threadId);
+      if (state.selectedId === threadId) clearUploadProgress("composerFiles");
       updateActiveTurnControls();
+    }
+  }
+
+  async function deliverComposerSubmission(threadId, submission) {
+    const { params, id, method } = submission;
+    const steering = method === "turn/steer";
+    const targetThread = state.selectedId === threadId ? state.selectedThread : null;
+    const turnId = params.expectedTurnId;
+    const targetTurn = targetThread?.turns?.find((turn) => turn.id === turnId);
+    const pendingId = `remote-${id}`;
+    const pending = { id: pendingId, type: "userMessage", content: params.input, remotePending: true, deliveryState: "sending" };
+    if (steering && targetTurn && !findItemInThread(targetThread, pendingId)) {
+      targetTurn.items ||= [];
+      targetTurn.items.push(pending);
+    }
+    setComposerDelivery("sending", "正在核对工作站接收结果…", threadId, { pending: null, turnId: null });
+    if (state.selectedId === threadId) scheduleTimelineRender(true);
+    try {
+      const result = await rpc(method, params, id);
+      if (steering) {
+        setComposerDelivery("queued", "工作站已接收引导，等待 Codex 处理", threadId, { pending, pendingId, turnId });
+        const queued = findItemInThread(targetThread, pendingId);
+        if (queued) queued.deliveryState = "queued";
+      } else {
+        const turn = result?.turn || result;
+        if (!turn?.id) throw new Error("工作站没有返回轮次标识，请核对发送结果");
+        if (state.selectedId === threadId) {
+          upsertTurn(turn);
+          state.activeTurnId = turn.status === "inProgress" ? turn.id : null;
+          state.composerDirty = { model: false, effort: false, serviceTier: false, personality: false };
+        }
+        setComposerDelivery("accepted", "Codex 已接收消息", threadId);
+      }
+      saveSubmission(threadId, null);
+      if (readSubmission("new")?.thread?.id === threadId) saveSubmission("new", null);
+      const draft = composerDraft(threadId);
+      if (draft.text === submission.text) draft.text = "";
+      const sentFiles = draft.files.filter((file) => submission.uploadedPaths.includes(file.uploaded?.path));
+      draft.files = draft.files.filter((file) => !sentFiles.includes(file));
+      draft.restored = true;
+      persistDraftFiles(threadId);
+      releaseSelectedFiles(sentFiles);
+      persistComposerDraft(threadId);
+      if (state.selectedId === threadId) {
+        restoreComposerDraft(threadId);
+        closeComposerSettings();
+        updateActiveTurnControls();
+        scheduleTimelineRender(true);
+        await refreshSelectedThread(true);
+      }
+      return true;
+    } catch (error) {
+      const uncertain = submissionIsUncertain(error);
+      if (!uncertain) {
+        saveSubmission(threadId, null);
+        const creation = readSubmission("new");
+        if (creation?.thread?.id === threadId) {
+          creation.turnRequestId = crypto.randomUUID();
+          saveSubmission("new", creation);
+        }
+        if (targetTurn) targetTurn.items = (targetTurn.items || []).filter((item) => item.id !== pendingId);
+      }
+      setComposerDelivery(uncertain ? "unknown" : "error", uncertain
+        ? `发送结果待确认：${readableError(error)}。点击“核对发送”，不会重复执行。`
+        : `发送被拒绝：${readableError(error)}，草稿已保留`, threadId);
+      if (state.selectedId === threadId) { updateActiveTurnControls(); scheduleTimelineRender(false); }
+      return false;
     }
   }
 
@@ -1802,13 +2025,14 @@
     textarea.rows = Math.min(7, Math.max(2, textarea.value.split("\n").length));
   }
 
-  async function turnInputs(text, attachments, onProgress = () => {}) {
+  async function turnInputs(text, attachments, onProgress = () => {}, draftKey = "") {
     const total = attachments.reduce((sum, attachment) => sum + attachment.size, 0);
     const uploaded = [];
     let completed = 0;
     for (const attachment of attachments) {
       const result = attachment.uploaded || await uploadAttachment(attachment, (loaded) => onProgress(completed + loaded, total, attachment.name));
       attachment.uploaded = result;
+      if (draftKey) persistDraftFiles(draftKey);
       uploaded.push({ ...result, type: attachment.type });
       completed += attachment.size;
       onProgress(completed, total, attachment.name);
@@ -1832,6 +2056,8 @@
         state[stateKey].push({ name: file.name, size: file.size, type: file.type, file, previewUrl: IMAGE_TYPES.has(file.type) ? URL.createObjectURL(file) : "" });
       }
       renderSelectedFiles(stateKey);
+      if (stateKey === "composerFiles") { saveComposerDraft(); persistDraftFiles(state.selectedId); updateActiveTurnControls(); }
+      else persistDraftFiles("new");
     } catch (error) {
       renderSelectedFiles(stateKey);
       toast(readableError(error), "error");
@@ -1842,6 +2068,11 @@
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `/api/uploads?name=${encodeURIComponent(attachment.name)}`);
+      attachment.xhr = xhr;
+      xhr.timeout = 30 * 60 * 1000;
+      xhr.onabort = () => reject(new Error("已取消上传，附件已保留，可再次发送"));
+      xhr.ontimeout = () => reject(new Error("上传超时，附件已保留"));
+      xhr.onloadend = () => { delete attachment.xhr; };
       xhr.responseType = "json";
       xhr.setRequestHeader("Content-Type", attachment.type || "application/octet-stream");
       xhr.upload.onprogress = (event) => onProgress(event.loaded);
@@ -1861,6 +2092,8 @@
     if (!button) return;
     releaseSelectedFiles(state[stateKey].splice(Number(button.dataset.removeFile), 1));
     renderSelectedFiles(stateKey);
+    if (stateKey === "composerFiles") { saveComposerDraft(); persistDraftFiles(state.selectedId); updateActiveTurnControls(); }
+    else persistDraftFiles("new");
   }
 
   function releaseSelectedFiles(files) {
@@ -1885,62 +2118,105 @@
     const container = $(stateKey === "composerFiles" ? "#composerAttachments" : "#newThreadAttachments");
     const files = state[stateKey];
     container.hidden = files.length === 0;
-    container.innerHTML = files.map((file, index) => `<figure class="${IMAGE_TYPES.has(file.type) ? "image-attachment" : "file-attachment"}">${IMAGE_TYPES.has(file.type) ? `<img src="${escapeHtml(file.previewUrl)}" alt="${escapeHtml(file.name)}">` : '<svg><use href="#i-file"/></svg>'}<figcaption>${escapeHtml(file.name)} · ${formatBytes(file.size)}</figcaption><button type="button" data-remove-file="${index}" aria-label="移除 ${escapeHtml(file.name)}">×</button></figure>`).join("");
+    container.innerHTML = files.map((file, index) => `<figure class="${IMAGE_TYPES.has(file.type) ? "image-attachment" : "file-attachment"}">${IMAGE_TYPES.has(file.type) ? `<img data-preview-file src="${escapeHtml(file.previewUrl)}" alt="${escapeHtml(file.name)}">` : '<svg><use href="#i-file"/></svg>'}<figcaption>${escapeHtml(file.name)} · ${formatBytes(file.size)}</figcaption><button type="button" data-remove-file="${index}" aria-label="移除 ${escapeHtml(file.name)}">×</button></figure>`).join("");
   }
 
   async function createThread(event) {
     event.preventDefault();
+    if (state.creatingThread) return;
     const button = event.submitter || $("#createThreadSubmit");
+    let submission = readSubmission("new");
+    const files = [...state.newThreadFiles];
     const cwd = $("#newCwd").value.trim();
-    const model = $("#newModel").value;
-    const effort = runtimeRangeValue($("#newEffort"));
-    const serviceTier = runtimeRangeValue($("#newServiceTier"));
-    const prompt = $("#newPrompt").value.trim();
-    if (!cwd || (!prompt && !state.newThreadFiles.length)) return;
-    const submittedFiles = [...state.newThreadFiles];
-    setBusy(button, true, submittedFiles.length ? "正在上传…" : "正在创建…");
+    const prompt = $("#newPrompt").value;
+    if (!submission && (!cwd || (!prompt.trim() && !files.length))) return;
+    state.creatingThread = true;
+    setBusy(button, true, "正在创建…");
     try {
-      const inputs = await turnInputs(prompt, submittedFiles, (loaded, total, name) => renderUploadProgress("newThreadFiles", loaded, total, name));
-      setBusy(button, true, "正在创建…");
-      const params = { cwd };
-      if (model) params.model = model;
-      if (serviceTier) params.serviceTier = serviceTier;
-      const start = await rpc("thread/start", params);
-      const thread = start?.thread || start;
-      if (!thread?.id) throw new Error("工作站没有返回会话 ID");
-      localStorage.setItem("codex-remote:last-cwd", cwd);
-      closeDialog($("#newThreadDialog"));
-      state.selectedProject = cwd;
-      state.threads.unshift(thread);
-      rememberWorkspaceThreads([{ ...thread, cwd: thread.cwd || cwd }]);
-      const turnParams = { threadId: thread.id, input: inputs };
-      if (effort) turnParams.effort = effort;
-      if (serviceTier) turnParams.serviceTier = serviceTier;
-      const turnResult = await rpc("turn/start", turnParams);
-      await selectThread(thread.id);
-      const turn = turnResult?.turn || turnResult;
-      if (turn?.id) {
-        upsertTurn(turn);
-        state.activeTurnId = turn.id;
-        updateActiveTurnControls();
-        scheduleTimelineRender(true);
+      if (!submission) {
+        const params = { cwd };
+        if ($("#newModel").value) params.model = $("#newModel").value;
+        const effort = runtimeRangeValue($("#newEffort"));
+        const serviceTier = runtimeRangeValue($("#newServiceTier"));
+        if (serviceTier) params.serviceTier = serviceTier;
+        const inputs = await turnInputs(prompt.trim(), files, (loaded, total, name) => renderUploadProgress("newThreadFiles", loaded, total, name), "new");
+        submission = {
+          id: crypto.randomUUID(), turnRequestId: crypto.randomUUID(), params, inputs, text: prompt, effort, serviceTier,
+          uploadedPaths: files.map((file) => file.uploaded?.path).filter(Boolean),
+        };
+        saveSubmission("new", submission);
       }
-      $("#newPrompt").value = "";
-      state.newThreadFiles = state.newThreadFiles.filter((file) => !submittedFiles.includes(file));
-      releaseSelectedFiles(submittedFiles);
+      if (!submission.thread) {
+        const result = await rpc("thread/start", submission.params, submission.id);
+        submission.thread = result?.thread || result;
+        if (!submission.thread?.id) throw new Error("工作站没有返回会话标识，请继续核对创建结果");
+        saveSubmission("new", submission);
+      }
+      const thread = submission.thread;
+      const turnParams = { threadId: thread.id, input: submission.inputs };
+      if (submission.effort) turnParams.effort = submission.effort;
+      if (submission.serviceTier) turnParams.serviceTier = submission.serviceTier;
+      const turnSubmission = readSubmission(thread.id) || {
+        id: submission.turnRequestId, method: "turn/start", params: turnParams,
+        text: submission.text, uploadedPaths: submission.uploadedPaths,
+      };
+      saveSubmission(thread.id, turnSubmission);
+      const draft = composerDraft(thread.id);
+      if (!draft.text) draft.text = submission.text;
+      for (const file of files) {
+        if (submission.uploadedPaths.includes(file.uploaded?.path) && !draft.files.includes(file)) draft.files.push(file);
+      }
+      persistComposerDraft(thread.id);
+      persistDraftFiles(thread.id);
+      state.threads = [thread, ...state.threads.filter((entry) => entry.id !== thread.id)];
+      state.selectedProject = submission.params.cwd;
+      rememberWorkspaceThreads([thread]);
+      renderThreadList();
+      try { localStorage.setItem("codex-remote:last-cwd", submission.params.cwd); } catch {}
+      closeDialog($("#newThreadDialog"));
+      if ($("#newPrompt").value === submission.text) $("#newPrompt").value = "";
+      state.newThreadFiles = state.newThreadFiles.filter((file) => !draft.files.includes(file));
+      persistDraftFiles("new");
       renderSelectedFiles("newThreadFiles");
-      loadThreads(true).catch(() => {});
-      toast("会话已创建", "success");
+      state.sendingThreads.add(thread.id);
+      try {
+        // Start the first turn before reading history: a new thread may not yet
+        // have a readable rollout. Failure still opens this same thread's draft.
+        await deliverComposerSubmission(thread.id, turnSubmission);
+      } finally {
+        state.sendingThreads.delete(thread.id);
+        await selectThread(thread.id);
+      }
+      loadThreads(false).catch(() => {});
     } catch (error) {
-      toast(readableError(error), "error");
+      if (submission && !submission.thread && !submissionIsUncertain(error)) saveSubmission("new", null);
+      $("#newThreadStatus").textContent = readSubmission("new")
+        ? `创建结果待确认：${readableError(error)}。再次点击将核对同一次创建。`
+        : readableError(error);
+      $("#newThreadStatus").hidden = false;
     } finally {
+      state.creatingThread = false;
       clearUploadProgress("newThreadFiles");
       setBusy(button, false);
+      renderNewThreadRecovery();
+    }
+  }
+
+  function renderNewThreadRecovery() {
+    const submission = readSubmission("new");
+    $("#createThreadSubmit").textContent = submission ? (submission.thread ? "继续发送" : "核对创建") : "创建并发送";
+    $("#newThreadForm").noValidate = Boolean(submission);
+    if (submission) {
+      if ($("#newThreadStatus").hidden) $("#newThreadStatus").textContent = `上次创建尚待确认 · ${submission.params.cwd}。核对会继续原提交，当前表单不会重复创建任务。`;
+      $("#newThreadStatus").hidden = false;
     }
   }
 
   function openNewThreadDialog() {
+    restoreDraftFiles("new");
     renderWorkspaceDirectories();
+    $("#newThreadStatus").hidden = true;
+    renderNewThreadRecovery();
     showDialog($("#newThreadDialog"));
     if (!state.workspaceDiscoveryLoaded) syncWorkspaceDirectories(false).catch(() => {});
     loadDirectory("/");
@@ -2070,10 +2346,11 @@
     state.projectFilesPath = result.path || "";
     state.projectFilesParent = result.parent || "";
     const cwd = String(state.selectedThread?.cwd || "").replace(/\/+$/, "");
-    $("#projectFilesPath").textContent = `${cwd}/${state.projectFilesPath}`.replace(/\/$/, "") || "/";
-    $("#projectFilesBack").disabled = !state.projectFilesPath;
-    const entries = Array.isArray(result.entries) ? result.entries : [];
-    $("#projectFilesList").innerHTML = entries.length ? entries.map((entry) => `<button type="button" data-project-entry="${escapeHtml(entry.path)}" data-project-entry-type="${escapeHtml(entry.type)}"><svg><use href="#${entry.type === "directory" ? "i-folder" : "i-file"}"/></svg><span><strong>${escapeHtml(entry.name)}</strong><small>${entry.type === "directory" ? "目录" : formatBytes(entry.size)}</small></span><svg><use href="#i-chevron"/></svg></button>`).join("") : '<div class="directory-empty">这个目录为空</div>';
+    $("#projectFilesPath").textContent = state.projectFilesPath.startsWith("/") ? state.projectFilesPath : `${cwd}/${state.projectFilesPath}`;
+    $("#projectFilesBack").disabled = state.projectFilesPath === "/";
+    const entries = [...(result.entries || [])].sort((a, b) => (b.type === "directory") - (a.type === "directory") || a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
+    renderFileSelection();
+    $("#projectFilesList").innerHTML = entries.length ? entries.map((entry) => `<div class="project-file-row"><input type="checkbox" data-project-select="${escapeHtml(entry.path)}" aria-label="选择 ${escapeHtml(entry.name)}" ${state.projectFileSelection.has(entry.path) ? "checked" : ""}><button type="button" data-project-entry="${escapeHtml(entry.path)}" data-project-entry-type="${escapeHtml(entry.type)}"><svg><use href="#${entry.type === "directory" ? "i-folder" : "i-file"}"/></svg><span><strong>${escapeHtml(entry.name)}</strong><small>${entry.type === "directory" ? "目录" : formatBytes(entry.size)}</small></span><svg><use href="#i-chevron"/></svg></button></div>`).join("") : '<div class="directory-empty">这个目录为空</div>';
     if (result.truncated) $("#projectFilesList").insertAdjacentHTML("beforeend", '<div class="directory-empty">仅显示前 2000 项</div>');
   }
 
@@ -2085,7 +2362,13 @@
   }
 
   async function openProjectFile(path) {
+    const sequence = ++state.projectPreviewSequence;
     const preview = $("#projectFilePreview");
+    state.projectFileSource = "";
+    state.projectPreviewPath = path;
+    $("#projectPreviewMode").value = "code";
+    $("#projectPreviewMode").disabled = true;
+    renderProjectPreview();
     const name = String(path || "").split("/").pop() || path;
     preview.hidden = false;
     $("#projectFilesBody").classList.add("previewing");
@@ -2098,6 +2381,7 @@
     try {
       const response = await fetch(projectFilesUrl(path), { credentials: "same-origin", cache: "no-store" });
       const body = await response.text();
+      if (sequence !== state.projectPreviewSequence) return;
       if (!response.ok) {
         let message = body;
         try { message = JSON.parse(body)?.error?.message || JSON.parse(body)?.message || body; } catch {}
@@ -2107,6 +2391,8 @@
         renderProjectDirectory(JSON.parse(body));
         return;
       }
+      state.projectFileSource = body;
+      $("#projectPreviewMode").disabled = !/\.(md|markdown|html?|json|svg)$/i.test(path);
       const language = codeLanguage(path);
       $("#projectFileMeta").textContent = `${language || "text"} · ${formatBytes(new TextEncoder().encode(body).length)} · 只读`;
       $("#projectFileCode").dataset.language = language || "text";
@@ -2117,7 +2403,57 @@
     }
   }
 
+  function renderFileSelection() {
+    const count = state.projectFileSelection.size;
+    $("#downloadSelection").disabled = !count;
+    $("#downloadSelection").textContent = count ? `打包下载 (${count})` : "打包下载";
+    $("#clearFileSelection").hidden = !count;
+  }
+
+  function downloadFileSelection() {
+    // Native form downloads stream to disk instead of retaining the ZIP in JS memory.
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = "/api/files/archive";
+    form.target = "_blank";
+    form.rel = "noopener";
+    for (const [name, value] of [["threadId", state.selectedId], ...[...state.projectFileSelection].map(path => ["path", path])]) {
+      const input = document.createElement("input");
+      input.type = "hidden"; input.name = name; input.value = value; form.append(input);
+    }
+    document.body.append(form); form.submit(); form.remove();
+  }
+
+  function renderProjectPreview() {
+    const formatted = $("#projectPreviewMode").value === "formatted";
+    const rendered = $("#projectFileRendered");
+    $("#projectFileCode").parentElement.hidden = formatted;
+    rendered.hidden = !formatted;
+    rendered.replaceChildren();
+    if (!formatted) return;
+    const source = state.projectFileSource;
+    if (/\.(md|markdown)$/i.test(state.projectPreviewPath)) {
+      rendered.innerHTML = markdownHtml(source);
+    } else if (/\.json$/i.test(state.projectPreviewPath)) {
+      const pre = document.createElement("pre");
+      try { pre.textContent = JSON.stringify(JSON.parse(source), null, 2); }
+      catch { pre.textContent = "JSON 格式无效，请查看源码。"; }
+      rendered.append(pre);
+    } else {
+      const frame = document.createElement("iframe");
+      frame.title = "文件格式化预览";
+      frame.setAttribute("sandbox", "");
+      frame.referrerPolicy = "no-referrer";
+      const url = new URL(projectFilesUrl(state.projectPreviewPath), location.href);
+      url.searchParams.set("preview", "1");
+      frame.src = url.href;
+      rendered.append(frame);
+    }
+  }
+
   function closeProjectFilePreview() {
+    ++state.projectPreviewSequence;
+    $("#projectFileRendered").replaceChildren();
     $("#projectFilePreview").hidden = true;
     $("#projectFilesBody").classList.remove("previewing");
   }
@@ -2125,18 +2461,89 @@
   function openProjectPath(value) {
     const cwd = String(state.selectedThread?.cwd || "").replace(/\/+$/, "");
     let path = String(value || "").replace(/:(\d+)(?::\d+)?$/, "").replace(/^\.\//, "");
-    if (!cwd || !path) return false;
-    if (path.startsWith("/")) {
-      if (path !== cwd && !path.startsWith(`${cwd}/`)) return false;
-      path = path.slice(cwd.length).replace(/^\/+/, "");
-    }
-    if (!path || path === ".." || path.startsWith("../")) return false;
+    if (!path || (!cwd && !path.startsWith("/"))) return false;
     showDialog($("#projectFilesDialog"));
     const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
     loadProjectDirectory(parent).then(() => openProjectFile(path));
     return true;
   }
 
+
+  function attachmentStore(mode, key, value) {
+    if (!("indexedDB" in window)) return Promise.resolve(null);
+    state.draftDB ||= new Promise((resolve, reject) => {
+      const request = indexedDB.open("codex-remote-drafts", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("files");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    return state.draftDB.then(db => new Promise((resolve, reject) => {
+      const tx = db.transaction("files", mode), store = tx.objectStore("files");
+      const request = mode === "readonly" ? store.get(key) : value.length ? store.put(value, key) : store.delete(key);
+      tx.oncomplete = () => resolve(request.result);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    }));
+  }
+
+  function persistDraftFiles(threadId) {
+    const files = threadId === "new" ? state.newThreadFiles : composerDraft(threadId).files;
+    const saved = files.map(({name, size, type, file, uploaded}) => ({name, size, type, file, uploaded}));
+    return attachmentStore("readwrite", threadId, saved).catch(() => toast("浏览器未能保存附件，请保持页面打开直到发送完成", "warning"));
+  }
+
+  async function restoreDraftFiles(threadId) {
+    const draft = threadId === "new" ? { files: state.newThreadFiles } : composerDraft(threadId);
+    if (draft.files.length || draft.restored) return;
+    draft.restored = true;
+    try {
+      const files = await attachmentStore("readonly", threadId);
+      if (!files?.length || draft.files.length) return;
+      draft.files = files.map(file => ({...file, previewUrl: IMAGE_TYPES.has(file.type) ? URL.createObjectURL(file.file) : ""}));
+      if (threadId === "new") { state.newThreadFiles = draft.files; renderSelectedFiles("newThreadFiles"); }
+      else if (state.selectedId === threadId) { state.composerFiles = draft.files; renderSelectedFiles("composerFiles"); updateActiveTurnControls(); }
+    } catch { toast("附件草稿读取失败，文字草稿仍可使用", "warning"); }
+  }
+
+  function previewSelectedFile(event) {
+    const image = event.target.closest("[data-preview-file]");
+    if (image) openImageViewer(image);
+  }
+
+  async function openUploads() {
+    showDialog($("#uploadsDialog"));
+    const list = $("#uploadsList");
+    list.textContent = "正在读取附件…";
+    try {
+      const result = await request("/api/uploads");
+      list.innerHTML = (result.data || []).map(file => `<article class="upload-row"><button type="button" class="text-button" data-open-upload="${escapeHtml(file.path)}">${escapeHtml(file.name)}<small>${formatBytes(file.size)}</small></button><a class="quiet-button" href="${escapeHtml(projectFilesUrl(file.path, true))}" download>下载</a><button type="button" class="quiet-button" data-delete-upload="${escapeHtml(file.path)}" aria-label="删除 ${escapeHtml(file.name)}">删除</button></article>`).join("") || '<p class="list-message">暂无已上传附件</p>';
+    } catch (error) { list.textContent = readableError(error); }
+  }
+
+  async function handleUploadAction(event) {
+    const open = event.target.closest("[data-open-upload]");
+    if (open) {
+      const path = open.dataset.openUpload;
+      if (/\.(png|jpe?g|gif|webp)$/i.test(path)) { const image = document.createElement("img"); image.src = artifactUrl(path); image.alt = open.textContent; openImageViewer(image); }
+      else openProjectPath(path);
+      return;
+    }
+    const remove = event.target.closest("[data-delete-upload]");
+    if (!remove || !confirm("删除工作站上的这个附件？历史消息中的链接将无法再打开。")) return;
+    setBusy(remove, true);
+    try {
+      await request(`/api/uploads?path=${encodeURIComponent(remove.dataset.deleteUpload)}`, {method:"DELETE"});
+      for (const [threadId,draft] of state.composerDrafts) { for (const file of draft.files) if (file.uploaded?.path === remove.dataset.deleteUpload) delete file.uploaded; persistDraftFiles(threadId); }
+      for (const file of state.newThreadFiles) if (file.uploaded?.path === remove.dataset.deleteUpload) delete file.uploaded;
+      persistDraftFiles("new"); await openUploads();
+    }
+    catch (error) { toast(readableError(error), "error"); setBusy(remove, false); }
+  }
+
+  function renderRequestHistory() {
+    const labels = {answered:"已处理", timeout:"已过期", disconnected:"连接中断", resolved:"已在其他客户端处理", thread_revoked:"已失效", unknown:"结果未确认"};
+    $("#requestHistory").innerHTML = state.requestHistory.map(entry => `<article class="request-history-row"><strong>${escapeHtml(requestMeta(entry.method).title)} · ${escapeHtml(entry.decision || labels[entry.status] || entry.status)}</strong><small>${escapeHtml(entry.summary || "")} · ${escapeHtml(new Date(entry.at).toLocaleString())}</small>${entry.threadId ? `<button type="button" class="text-button" data-history-thread="${escapeHtml(entry.threadId)}">打开任务</button>` : ""}</article>`).join("") || '<p class="list-message">暂无处理记录</p>';
+  }
   function codeLanguage(path) {
     const name = String(path || "").split("/").pop().toLowerCase();
     if (["dockerfile", "makefile"].includes(name)) return name;
@@ -2154,6 +2561,8 @@
       rust: "as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while",
       java: "abstract assert boolean break byte case catch char class const continue default do double else enum extends false final finally float for goto if implements import instanceof int interface long native new null package private protected public return short static strictfp super switch synchronized this throw throws transient true try void volatile while",
       json: "true false null",
+      toml: "true false",
+      yaml: "true false null",
       shell: "case do done elif else esac export fi for function if in local readonly return set then unset while",
       sql: "and as asc by case create delete desc distinct drop else end false from group having in inner insert into is join left like limit not null on or order outer right select set table true union update values where",
     };
@@ -2198,6 +2607,7 @@
   }
 
   async function handleThreadAction(action) {
+    if (action === "results") { closeThreadMenu(); openResults(); return; }
     closeThreadMenu();
     if (!state.selectedId) return;
     if (action === "files") {
@@ -2383,6 +2793,7 @@
     $("#goalStatus").value = state.selectedGoal?.status || "active";
     $("#goalBudget").value = state.selectedGoal?.tokenBudget || "";
     $("#clearGoalButton").hidden = !state.selectedGoal;
+    renderGoalUsage();
     showDialog($("#goalDialog"));
   }
 
@@ -2434,6 +2845,7 @@
       const payload = await request("/api/requests");
       const root = payload && Object.prototype.hasOwnProperty.call(payload, "result") ? payload.result : payload;
       const requests = Array.isArray(root) ? root : normalizeArray(root, ["requests", "data"]);
+      state.requestHistory = (root.history || []).filter(entry => entry.status !== "pending");
       state.pendingRequests.clear();
       requests.forEach((entry, index) => {
         const normalized = normalizeRequest(entry, index);
@@ -2471,6 +2883,7 @@
 
   function renderRequestsList() {
     const list = $("#requestsList");
+    renderRequestHistory();
     if (!state.pendingRequests.size) {
       list.innerHTML = '<div class="requests-empty"><span class="eyebrow">QUEUE CLEAR</span><p>当前没有等待处理的请求</p></div>';
       return;
@@ -2488,6 +2901,7 @@
   }
 
   function openRequestsCenter() {
+    loadRequests();
     renderRequestsList();
     showDialog($("#requestsDialog"));
   }
@@ -2773,6 +3187,7 @@
       renderRequestCount();
       renderRequestsList();
       closeDialog($("#requestDialog"));
+      loadRequests();
       toast("响应已送达工作站", "success");
     } catch (error) {
       toast(readableError(error), "error");
@@ -2788,6 +3203,7 @@
       state.workspaceRoots = Array.isArray(state.backendStatus?.allowedRoots) ? state.backendStatus.allowedRoots : [];
       applyWorkspaceScope();
       renderRawStatus();
+      renderDiagnostics();
       updateConnectivity();
     } catch (error) {
       state.backendStatus = { reachable: false, error: readableError(error) };
@@ -2834,102 +3250,59 @@
     return `<div class="rate-window"><div class="rate-row"><strong>${escapeHtml(label)}</strong><span><b>剩余 ${remaining.toFixed(0)}%</b>${escapeHtml(reset)}</span></div><progress class="rate-meter ${level}" max="100" value="${remaining}" aria-label="${escapeHtml(label)}剩余 ${remaining.toFixed(0)}%"></progress></div>`;
   }
 
-  function nativeNotificationBridge() {
-    if (!("Notification" in window)) return false;
-    const userAgent = navigator.userAgent || "";
-    const androidWebView = /Android/i.test(userAgent) && (/;\s*wv\)/i.test(userAgent) || /Version\/4\.0.*Chrome\/.*Mobile Safari/i.test(userAgent));
-    return window.__CODEX_REMOTE_NATIVE_NOTIFICATIONS__ === true
-      || typeof Notification.requestPermission !== "function"
-      || androidWebView;
+
+  const CLIENT_VERSION = "0.7.1";
+
+  function diagnosticText() {
+    const backend = state.backendStatus?.backend || state.backendStatus || {};
+    return [`客户端 ${CLIENT_VERSION} · 工作站 ${state.backendStatus?.receiverVersion || "未知"}`,
+      `网络 ${navigator.onLine ? "在线" : "离线"} · 实时连接 ${state.sseConnected ? "已连接" : "重连中"}`,
+      `最近同步 ${state.lastSyncAt ? new Date(state.lastSyncAt).toLocaleString() : "尚未同步"}`,
+      `Codex ${backend.transport || "未连接"} · ${backend.connected ? "就绪" : "等待连接"}`,
+      `待处理请求 ${state.pendingRequests.size} · ${window.isSecureContext ? "安全连接" : "普通 HTTP"}`,
+      navigator.userAgent].join("\n");
+  }
+
+  function renderDiagnostics() {
+    if (!$("#diagnostics")) return;
+    $("#diagnostics").textContent = diagnosticText();
+    const version = state.backendStatus?.receiverVersion;
+    $("#clientUpdateNotice").hidden = !version || version === CLIENT_VERSION;
+  }
+
+  async function openResults() {
+    const threadId = state.selectedId;
+    showDialog($("#resultsDialog"));
+    $("#resultsBody").textContent = "正在汇总本轮结果…";
+    await refreshSelectedThread(true);
+    if (state.selectedId !== threadId) return;
+    const turn = state.selectedThread?.turns?.at(-1);
+    const items = turn?.items || [];
+    const messages = items.filter(item => item.type === "agentMessage");
+    const answer = messages.at(-1)?.text || "本轮尚无最终回复";
+    const commands = items.filter(item => item.type === "commandExecution");
+    const failed = commands.filter(item => typeof item.exitCode === "number" && item.exitCode !== 0);
+    const completed = commands.filter(item => item.exitCode === 0);
+    const paths = [...new Set(items.filter(item => item.type === "fileChange").flatMap(item => (item.changes || []).map(change => change.path)).filter(Boolean))];
+    const diff = items.filter(item => item.type === "turnDiff").map(item => item.diff || "").join("\n");
+    $("#resultsBody").innerHTML = `<p class="result-state">${escapeHtml(turnStatusLabel(turn?.status || "inProgress"))} · ${completed.length} 条命令成功${failed.length ? ` · ${failed.length} 条失败` : ""}</p><div class="markdown-body">${markdownHtml(answer)}</div>${paths.length ? `<h3>变更文件 · ${paths.length}</h3>${paths.map(path => `<button type="button" class="result-path" data-result-path="${escapeHtml(path)}">${escapeHtml(path)}</button>`).join("")}` : ""}${commands.length ? `<details><summary>命令结果 · ${commands.length}</summary>${commands.map(item => `<p>${escapeHtml(item.command || "命令")} · ${item.exitCode == null ? "尚未报告退出码" : `退出码 ${item.exitCode}`}</p>`).join("")}</details>` : ""}${diff ? `<details><summary>本轮差异</summary><pre>${escapeHtml(diff)}</pre></details>` : ""}`;
+  }
+
+  function renderGoalUsage() {
+    const goal = state.selectedGoal;
+    if (!goal) { $("#goalUsage").textContent = "尚未设置目标"; return; }
+    const values = [];
+    const used = goal.tokensUsed ?? goal.tokenUsage?.totalTokens ?? goal.usage?.totalTokens;
+    const elapsed = goal.timeUsedSeconds ?? goal.elapsedSeconds ?? goal.elapsedTimeSeconds;
+    if (Number.isFinite(used)) values.push(`已用 ${used.toLocaleString()} tokens`);
+    if (Number.isFinite(goal.tokenBudget)) values.push(`预算 ${goal.tokenBudget.toLocaleString()} tokens${Number.isFinite(used) ? ` · 剩余 ${Math.max(0, goal.tokenBudget-used).toLocaleString()}` : ""}`);
+    if (Number.isFinite(elapsed)) values.push(`已运行 ${formatDuration(elapsed*1000)}`);
+    $("#goalUsage").textContent = values.join(" · ") || "工作站尚未提供目标用量";
   }
 
   function renderRawStatus() {
+    renderDiagnostics();
     $("#rawStatus").textContent = state.backendStatus ? safeStringify(state.backendStatus, 2) : "暂无数据";
-  }
-
-  function renderNotificationControl() {
-    const button = $("#notificationButton");
-    const testButton = $("#testNotificationButton");
-    const copy = $("#notificationStatusText");
-    if (!button || !testButton || !copy) return;
-    const nativeBridge = nativeNotificationBridge();
-    if (!("Notification" in window) || (!window.isSecureContext && !nativeBridge)) {
-      button.disabled = true;
-      testButton.disabled = true;
-      $("span", button).textContent = "不可用";
-      copy.textContent = "当前浏览器或连接环境不支持本地系统通知";
-      return;
-    }
-    const permission = nativeBridge ? "native" : Notification.permission;
-    if (!nativeBridge && permission === "denied") state.notificationsEnabled = false;
-    const enabled = state.notificationsEnabled && (nativeBridge || permission === "granted");
-    button.disabled = !nativeBridge && permission === "denied";
-    testButton.disabled = !enabled;
-    button.classList.toggle("active", enabled);
-    $("span", button).textContent = enabled ? "关闭通知" : permission === "denied" ? "已被浏览器阻止" : "启用通知";
-    copy.textContent = nativeBridge
-      ? enabled ? "套壳系统通知已启用：无需网页权限，任务完成时在后台提醒" : "检测到套壳系统通知：启用时不会申请网页通知权限"
-      : permission === "denied"
-      ? "浏览器已阻止通知，请在本站的浏览器权限设置中改为允许"
-      : enabled
-        ? "已启用：页面退到后台时只提醒任务完成；关闭页面后不推送"
-        : "页面退到后台时，只提醒任务完成；关闭页面后不推送";
-  }
-
-  async function toggleLocalNotifications() {
-    const nativeBridge = nativeNotificationBridge();
-    if (!("Notification" in window) || (!window.isSecureContext && !nativeBridge)) return toast("当前环境不支持本地系统通知", "warning");
-    if (state.notificationsEnabled && (nativeBridge || Notification.permission === "granted")) {
-      state.notificationsEnabled = false;
-      try { localStorage.removeItem("codex-remote:local-notifications"); } catch {}
-      renderNotificationControl();
-      toast("本地通知已关闭", "success");
-      return;
-    }
-    let permission = nativeBridge ? "granted" : Notification.permission;
-    if (!nativeBridge && permission === "default") permission = await Notification.requestPermission();
-    if (permission !== "granted") {
-      state.notificationsEnabled = false;
-      renderNotificationControl();
-      toast(permission === "denied" ? "浏览器阻止了通知权限，请在站点设置中允许" : "尚未授予通知权限，请在浏览器提示中选择允许", "warning", 7000);
-      return;
-    }
-    state.notificationsEnabled = true;
-    try { localStorage.setItem("codex-remote:local-notifications", "enabled"); } catch {}
-    renderNotificationControl();
-    toast(nativeBridge ? "套壳系统通知已启用，无需网页权限" : "本地通知已启用", "success");
-  }
-
-  async function testLocalNotification() {
-    const sent = await localNotify("Codex Remote 测试通知", "通知工作正常：任务完成时会在后台提醒。", "", "codex-remote-test", true);
-    toast(sent ? "测试通知已发送" : "测试通知发送失败，请检查浏览器通知设置", sent ? "success" : "warning");
-  }
-
-  async function localNotify(title, body, threadId = "", tag = "codex-remote", force = false) {
-    const nativeBridge = nativeNotificationBridge();
-    if (!state.notificationsEnabled || (!force && !document.hidden) || !("Notification" in window) || (!nativeBridge && Notification.permission !== "granted")) return false;
-    const url = new URL(location.href);
-    if (threadId) url.hash = `thread=${encodeURIComponent(threadId)}`;
-    const options = {
-      body: String(body || ""),
-      icon: "./icon.png?v=20260831.1",
-      badge: "./icon.png?v=20260831.1",
-      tag: String(tag || "codex-remote"),
-      renotify: false,
-      data: { url: url.href },
-    };
-    try {
-      if (nativeBridge) new Notification(String(title || "Codex Remote"), options);
-      else {
-        const registration = state.serviceWorkerRegistration || ("serviceWorker" in navigator ? await navigator.serviceWorker.ready : null);
-        if (registration?.showNotification) await registration.showNotification(String(title || "Codex Remote"), options);
-        else new Notification(String(title || "Codex Remote"), options);
-      }
-      return true;
-    } catch (error) {
-      console.info("本地通知发送失败", error);
-      return false;
-    }
   }
 
   function loadThemePreference() {
@@ -2971,10 +3344,72 @@
     try { localStorage.setItem(TEXT_SIZE_STORAGE_KEY, String(state.textSize)); } catch {}
   }
 
+  function renderConfigEditor(id) {
+    const input = $("#" + id);
+    const highlight = $("#" + id.replace("Source", "Highlight"));
+    const language = id === "codexConfigSource" ? "toml" : "json";
+    highlight.innerHTML = input.value.split("\n").map(line => `<span class="editor-line">${highlightSource(line, language) || " "}</span>`).join("");
+    highlight.scrollTop = input.scrollTop;
+    if (!input.parentElement.hidden) $("#configEditorLines").textContent = `${input.value.split("\n").length} 行`;
+  }
+
+  function selectConfigTab(tab) {
+    const auth = tab === "auth";
+    $("#configEditorPanel").hidden = auth;
+    $("#authEditorPanel").hidden = !auth;
+    for (const button of $$("[data-config-tab]")) {
+      const selected = button.dataset.configTab === tab;
+      button.setAttribute("aria-selected", String(selected)); button.tabIndex = selected ? 0 : -1;
+    }
+    $("#configEditorLanguage").textContent = auth ? "JSON" : "TOML";
+    $("#configEditorHint").textContent = auth ? "认证内容含密钥或 OAuth 令牌，不存入浏览器。留空并保存可移除文件认证。" : "直接编辑工作站配置。保存前会校验格式并备份旧文件。";
+    renderConfigEditor(auth ? "codexAuthSource" : "codexConfigSource");
+  }
+
+  async function loadCodexSettings(id = "") {
+    const sequence = state.codexSettingsReadSequence = (state.codexSettingsReadSequence || 0) + 1;
+    const result = await request(`/api/codex/settings${id ? `?id=${encodeURIComponent(id)}` : ""}`);
+    if (!$("#codexSettingsDialog").open || sequence !== state.codexSettingsReadSequence) return;
+    state.codexSettingsRevision = result.revision;
+    $("#codexSettingsLocation").textContent = result.home;
+    $("#codexConfigSource").value = result.config;
+    $("#codexAuthSource").value = result.auth;
+    renderConfigEditor("codexConfigSource"); renderConfigEditor("codexAuthSource");
+    $("#codexProfile").innerHTML = '<option value="">工作站当前文件</option>' + result.profiles.map(profile => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name)}${profile.id === result.active ? " · 当前" : ""}</option>`).join("");
+    $("#codexProfile").value = id;
+    $("#codexProfileName").value = result.profiles.find(profile => profile.id === id)?.name || "";
+    state.codexSettingsDirty = Boolean(id);
+  }
+
+  async function codexSettingsAction(action) {
+    if (state.codexSettingsBusy) return;
+    const id = $("#codexProfile").value;
+    if (["apply", "delete"].includes(action) && !id) return toast("请先选择一个已保存配置", "warning");
+    if (["apply", "delete"].includes(action) && state.codexSettingsDirty && !confirm("编辑内容尚未保存，继续此操作？")) return;
+    if (action === "delete" && !confirm("删除这个已保存的认证配置？")) return;
+    if (action === "reload" && !confirm("重载工作站 Codex？共享工作站的其他客户端也会断开重连。请确认任务已结束，未保存的编辑不会生效。")) return;
+    if (action === "reload" && state.codexSettingsDirty) return toast("请先保存或重新读取配置", "warning");
+    state.codexSettingsBusy = true;
+    $$("button", $("#codexSettingsDialog")).forEach(button => button.disabled = true);
+    try {
+      await request("/api/codex/settings", { method: "POST", body: JSON.stringify({ action, id, revision: state.codexSettingsRevision, name: $("#codexProfileName").value, config: $("#codexConfigSource").value, auth: $("#codexAuthSource").value }) });
+      if (action === "profile") {
+        // Refresh metadata without discarding a draft of shared workstation settings.
+        const config = $("#codexConfigSource").value, auth = $("#codexAuthSource").value;
+        await loadCodexSettings(); $("#codexConfigSource").value = config; $("#codexAuthSource").value = auth;
+        renderConfigEditor("codexConfigSource"); renderConfigEditor("codexAuthSource");
+        state.codexSettingsDirty = true;
+      } else await loadCodexSettings();
+      $("#codexSettingsMessage").textContent = action === "reload" ? "重载已完成，正在重新连接。" : action === "profile" ? "已保存认证配置。共享设置的编辑请使用“保存到工作站”。" : action === "delete" ? "配置已删除。" : "已保存。下次启动 Codex 生效，当前任务继续运行。";
+      if (action === "reload") reconnectNow();
+    } catch (error) { $("#codexSettingsMessage").textContent = readableError(error); }
+    finally { state.codexSettingsBusy = false; $$("button", $("#codexSettingsDialog")).forEach(button => button.disabled = false); }
+  }
+
   function openStatusDialog() {
     renderRawStatus();
     renderRateLimits();
-    renderNotificationControl();
+    renderDiagnostics();
     showDialog($("#statusDialog"));
   }
 
@@ -3070,6 +3505,7 @@
     if (event.type === "server_request_answered") {
       const key = String(event.key ?? event.request?.key ?? "");
       if (key) state.pendingRequests.delete(key);
+      loadRequests();
       if (state.currentRequestKey === key) {
         state.currentRequestKey = null;
         closeDialog($("#requestDialog"));
@@ -3080,7 +3516,7 @@
     }
     if (event.type === "backend_status") {
       const { type, ...status } = event;
-      state.backendStatus = status;
+      state.backendStatus = state.backendStatus?.backend ? {...state.backendStatus, backend:status} : status;
       renderRawStatus();
       updateConnectivity();
       return;
@@ -3097,10 +3533,9 @@
     const threadId = params.threadId || params.conversationId || params.thread?.id;
     scheduleAgentPreviewRefresh(threadId);
     const trackedDelivery = state.composerDeliveries.get(threadId);
-    if (trackedDelivery?.pending && params.item?.type === "userMessage" && sameUserMessage(trackedDelivery.pending, params.item)) {
+    if (trackedDelivery?.pending && params.turnId === trackedDelivery.turnId && params.item?.type === "userMessage" && sameUserMessage(trackedDelivery.pending, params.item)) {
       setComposerDelivery("accepted", "Codex 已接收引导，正在处理", threadId);
-    } else if (trackedDelivery?.turnId && method === "turn/completed" && trackedDelivery.turnId === params.turn?.id) {
-      setComposerDelivery("accepted", "Codex 已完成引导", threadId);
+
     }
     const normalizedMethod = String(method || "").replace(/[\/_-]/g, "").toLowerCase();
     if (normalizedMethod.includes("subagentactivity")) {
@@ -3111,9 +3546,6 @@
     if ((method === "item/started" || method === "item/completed") && isSubagentItem(params.item)) ingestSubagentItem(threadId, params.item);
     if (method === "turn/completed") {
       for (const item of params.turn?.items || []) if (isSubagentItem(item)) ingestSubagentItem(threadId, item);
-      const thread = state.threads.find((entry) => entry.id === threadId) || (threadId === state.selectedId ? state.selectedThread : null);
-      const finalMessage = [...(params.turn?.items || [])].reverse().find((item) => item?.type === "agentMessage")?.text;
-      localNotify(`Codex 已完成 · ${threadTitle(thread)}`, shorten(finalMessage || "Turn 已完成，可以返回查看结果。", 160), threadId, `turn-${params.turn?.id || threadId || "completed"}`);
     }
     if (method === "thread/started" && params.thread) {
       if (isSubagentThread(params.thread)) {
@@ -3441,8 +3873,11 @@
     const backendConnected = deepBoolean(state.backendStatus, ["connected", "online", "ready", "codexConnected", "backend.connected", "codex.connected", "status.connected"]);
     if (backendConnected === false) {
       setConnectionState("offline", state.backendStatus?.message || state.backendStatus?.error || "Codex 后端未连接");
+    } else if (state.syncError) {
+      setConnectionState("connecting", "会话同步暂时失败，已保留现有内容，正在重试");
     } else {
-      setConnectionState("online", "实时事件链路已连接");
+      const synced = state.lastSyncAt ? ` · 最近同步 ${new Date(state.lastSyncAt).toLocaleTimeString()}` : "";
+      setConnectionState("online", `实时事件链路已连接${synced}`);
     }
   }
 
@@ -3470,6 +3905,10 @@
 
   function closeDialog(dialog) {
     if (!dialog?.open) return;
+    if (dialog.id === "codexSettingsDialog" && state.authenticated) {
+      if (state.codexSettingsBusy) return;
+      if (state.codexSettingsDirty && !confirm("认证配置有未保存的编辑，放弃并关闭？")) return;
+    }
     try { dialog.close(); }
     catch { dialog.removeAttribute("open"); }
   }
@@ -3607,6 +4046,7 @@
 
   function readableError(error) {
     if (!error) return "发生未知错误";
+    if (/^(Failed to fetch|Load failed|NetworkError)/i.test(error.message || "")) return "网络连接中断";
     return error.message || String(error);
   }
 

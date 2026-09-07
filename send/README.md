@@ -9,7 +9,7 @@
 - 发送文字、图片和普通文件
 - 处理审批、权限、用户输入与 MCP 请求
 - 浏览当前项目中的文件
-- 切换主题、字号和本地通知
+- 切换主题和字号
 
 ## 运行方式
 
@@ -33,3 +33,5 @@ node --check send/markdown.js
 node --check send/sw.js
 node --test send/app.test.js send/markdown.test.js
 ```
+
+浏览器回归：运行 `node send/browser-fixture.cjs`（在项目根目录），打开 `http://127.0.0.1:18788/#thread=fixture`。该服务只使用虚构任务和认证信息；可通过 Chrome DevTools 调用 `runBrowserChecks()`。完成后停止服务并关闭测试页面。

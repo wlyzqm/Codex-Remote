@@ -32,9 +32,10 @@ type fakeBackend struct {
 	authorized    []string
 	malformedList bool
 	duplicateList bool
+	turnError     error
 }
 
-func (f *fakeBackend) Call(_ context.Context, method string, params json.RawMessage) (json.RawMessage, *codex.RPCError, error) {
+func (f *fakeBackend) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *codex.RPCError, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, method)
 	f.mu.Unlock()
@@ -68,6 +69,14 @@ func (f *fakeBackend) Call(_ context.Context, method string, params json.RawMess
 		return result, nil, err
 	case "model/list":
 		return json.RawMessage(`{"data":[],"nextCursor":null}`), nil, nil
+	case "thread/start":
+		result, err := json.Marshal(map[string]any{"thread": map[string]any{"id": "created", "cwd": f.insideCWD}})
+		return result, nil, err
+	case "turn/start", "turn/steer":
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		return json.RawMessage(`{"turn":{"id":"turn-1","status":"inProgress"}}`), nil, f.turnError
 	default:
 		return json.RawMessage(`{}`), nil, nil
 	}
@@ -757,7 +766,7 @@ func TestArtifactRouteServesOnlyAllowedRasterImages(t *testing.T) {
 	}
 }
 
-func TestProjectFilesAreScopedToThreadWorkspace(t *testing.T) {
+func TestProjectFilesAllowWorkstationNavigation(t *testing.T) {
 	webServer, backend, token := newTestServerInstance(t, false)
 	handler := webServer.Handler()
 	cookie := loginCookie(t, handler, token)
@@ -783,13 +792,13 @@ func TestProjectFilesAreScopedToThreadWorkspace(t *testing.T) {
 	}
 
 	root := doRequest(handler, http.MethodGet, "/api/files?threadId=inside", "", cookie, "")
-	if root.Code != http.StatusOK || !bytes.Contains(root.Body.Bytes(), []byte(`"name":"src"`)) || !bytes.Contains(root.Body.Bytes(), []byte(`"name":"config.json"`)) || bytes.Contains(root.Body.Bytes(), []byte(`"name":"escape"`)) {
+	if root.Code != http.StatusOK || !bytes.Contains(root.Body.Bytes(), []byte(`"name":"src"`)) || !bytes.Contains(root.Body.Bytes(), []byte(`"name":"config.json"`)) || !bytes.Contains(root.Body.Bytes(), []byte(`"name":"escape"`)) {
 		t.Fatalf("project root hid project files: status=%d body=%s", root.Code, root.Body.String())
 	}
 
 	query := "/api/files?threadId=inside&path=" + url.QueryEscape("src")
 	recorder := doRequest(handler, http.MethodGet, query, "", cookie, "")
-	if recorder.Code != http.StatusOK || !bytes.Contains(recorder.Body.Bytes(), []byte(`"path":"src"`)) || !bytes.Contains(recorder.Body.Bytes(), []byte(`"name":"main.go"`)) {
+	if recorder.Code != http.StatusOK || !bytes.Contains(recorder.Body.Bytes(), []byte(`"path":"`+sourceDir+`"`)) || !bytes.Contains(recorder.Body.Bytes(), []byte(`"name":"main.go"`)) {
 		t.Fatalf("project directory response: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 
@@ -806,8 +815,8 @@ func TestProjectFilesAreScopedToThreadWorkspace(t *testing.T) {
 		t.Fatalf("project download response: status=%d disposition=%q body=%q", recorder.Code, recorder.Header().Get("Content-Disposition"), recorder.Body.Bytes())
 	}
 	recorder = doRequest(handler, http.MethodGet, "/api/files?threadId=inside&path=..%2Fanother-project", "", cookie, "")
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("project traversal status=%d body=%s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("missing relative path status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	recorder = doRequest(handler, http.MethodGet, "/api/files?threadId=inside&path=config.json&download=1", "", cookie, "")
 	if recorder.Code != http.StatusOK || !bytes.Contains(recorder.Body.Bytes(), []byte("secret")) {

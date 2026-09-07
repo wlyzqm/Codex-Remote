@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 )
@@ -112,7 +114,8 @@ type childCandidate struct {
 // Codex's managed Unix-socket daemon; if no daemon is reachable, it lazily
 // starts the native Rust binary and tears it down after an idle window.
 type Client struct {
-	cfg Config
+	reloading bool
+	cfg       Config
 
 	startMu              sync.Mutex
 	mu                   sync.Mutex
@@ -186,15 +189,36 @@ func (c *Client) workspaceChecker() func(string) error {
 	return c.cfg.CheckPath
 }
 
+// ErrNotSubmitted means connection setup failed before this RPC was sent.
+var ErrNotSubmitted = errors.New("RPC was not submitted")
+
 func (c *Client) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *RPCError, error) {
 	if err := c.ensureConnected(ctx); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("%w: %w", ErrNotSubmitted, err)
 	}
 	c.mu.Lock()
 	transport := c.current
 	generation := c.generation
 	c.mu.Unlock()
 	result, rpcErr, err := c.callOn(ctx, transport, generation, method, params)
+	// Reading history does not load a thread for a new turn. Retry only an
+	// explicit not-found response, never a timeout or unknown transport result.
+	if err == nil && rpcErr != nil && method == "turn/start" && strings.HasPrefix(rpcErr.Message, "thread not found:") {
+		var input struct {
+			ThreadID string `json:"threadId"`
+		}
+		if json.Unmarshal(params, &input) == nil && input.ThreadID != "" {
+			resume, _ := json.Marshal(map[string]any{"threadId": input.ThreadID, "approvalPolicy": "never", "sandbox": "danger-full-access"})
+			_, resumeRPC, resumeErr := c.callOn(ctx, transport, generation, "thread/resume", resume)
+			if resumeErr != nil {
+				return nil, nil, fmt.Errorf("%w: restore thread: %v", ErrNotSubmitted, resumeErr)
+			}
+			if resumeRPC != nil {
+				return nil, resumeRPC, nil
+			}
+			result, rpcErr, err = c.callOn(ctx, transport, generation, method, params)
+		}
+	}
 	if err == nil && rpcErr == nil {
 		c.captureThreadWorkspaces(method, result, generation)
 	}
@@ -292,7 +316,7 @@ func (c *Client) activate(ctx context.Context, transport messageTransport, resol
 		"clientInfo": map[string]any{
 			"name":    "codex_remote_lite",
 			"title":   "Codex Remote Lite",
-			"version": "0.3.0",
+			"version": "0.4.0",
 		},
 		"capabilities": map[string]any{
 			"experimentalApi":                true,
@@ -331,7 +355,7 @@ func (c *Client) callOn(ctx context.Context, transport messageTransport, generat
 		params = json.RawMessage(`{}`)
 	}
 	c.mu.Lock()
-	if c.current != transport || c.generation != generation {
+	if c.reloading || c.current != transport || c.generation != generation {
 		c.mu.Unlock()
 		return nil, nil, errTransportClosed
 	}
@@ -456,6 +480,9 @@ func (c *Client) handleServerRequest(envelope rpcEnvelope, transport messageTran
 		return
 	}
 	_, authorized := c.authorizedThreads[threadID]
+	if c.workspaceChecker() == nil {
+		authorized = true
+	}
 	if !authorized && threadID != "" {
 		if candidate := c.childCandidates[threadID]; candidate != nil && candidate.Generation == generation {
 			queued := c.queueChildMessageLocked(candidate, envelope, true)
@@ -467,7 +494,7 @@ func (c *Client) handleServerRequest(envelope rpcEnvelope, transport messageTran
 		}
 	}
 	var fileApproval *fileApprovalEvidence
-	if authorized && envelope.Method == "item/fileChange/requestApproval" {
+	if authorized && c.workspaceChecker() != nil && envelope.Method == "item/fileChange/requestApproval" {
 		if approvalKey, _, err := fileApprovalKeyFromRequest(envelope.Params, generation); err == nil {
 			fileApproval = c.getFileApprovalLocked(approvalKey, time.Now())
 		}
@@ -493,7 +520,7 @@ func (c *Client) handleServerRequest(envelope rpcEnvelope, transport messageTran
 		Generation:   generation,
 		FileApproval: fileApproval,
 	}
-	if envelope.Method == "item/fileChange/requestApproval" {
+	if c.workspaceChecker() != nil && envelope.Method == "item/fileChange/requestApproval" {
 		if fileApproval != nil {
 			request.FileChanges = publicFileApprovalChanges(fileApproval)
 		}
@@ -615,10 +642,13 @@ func (c *Client) handleNotification(envelope rpcEnvelope, transport messageTrans
 		c.mu.Unlock()
 		return
 	}
+	if checkWorkspace == nil && threadID != "" {
+		c.authorizeThreadLocked(threadID)
+	}
 	if threadID != "" {
 		if _, authorized := c.authorizedThreads[threadID]; authorized {
 			if envelope.Method == "thread/started" {
-				if !startedThreadValid {
+				if checkWorkspace != nil && !startedThreadValid {
 					revoked := c.revokeThreadLocked(threadID)
 					c.mu.Unlock()
 					for _, request := range revoked {
@@ -1153,7 +1183,7 @@ func (c *Client) Respond(_ context.Context, key string, result json.RawMessage) 
 		c.mu.Unlock()
 		return os.ErrNotExist
 	}
-	if current.Method == "item/fileChange/requestApproval" && fileApprovalResultAccepted(sanitized) {
+	if c.workspaceChecker() != nil && current.Method == "item/fileChange/requestApproval" && fileApprovalResultAccepted(sanitized) {
 		if current.FileApproval == nil {
 			c.mu.Unlock()
 			return fmt.Errorf("%w: 文件变更清单已失效", ErrInvalidServerResponse)
@@ -1189,7 +1219,7 @@ func (c *Client) Respond(_ context.Context, key string, result json.RawMessage) 
 		go c.disconnect(transport, current.Generation, "server response write failed")
 		return err
 	}
-	c.cfg.Emit(map[string]any{"type": "server_request_answered", "key": key})
+	c.cfg.Emit(map[string]any{"type": "server_request_answered", "key": key, "decision": json.RawMessage(sanitized)})
 	return nil
 }
 
@@ -1380,4 +1410,42 @@ func (c *Client) Close() error {
 
 func cloneRaw(raw json.RawMessage) json.RawMessage {
 	return append(json.RawMessage(nil), raw...)
+}
+
+// Reload is an explicit user action, separate from saving account settings.
+func (c *Client) Reload() error {
+	c.startMu.Lock()
+	defer c.startMu.Unlock()
+	c.mu.Lock()
+	if len(c.activeTurns) > 0 || len(c.requests) > 0 || len(c.pending) > 0 {
+		c.mu.Unlock()
+		return errors.New("仍有任务或请求正在进行，请结束后重载")
+	}
+	transport, generation := c.current, c.generation
+	c.reloading = true
+	c.mu.Unlock()
+	defer func() { c.mu.Lock(); c.reloading = false; c.mu.Unlock() }()
+	shared := transport != nil && transport.Kind() == "shared-daemon"
+	if transport == nil && c.cfg.Mode != "spawn" {
+		info, err := os.Stat(c.cfg.DaemonSocket)
+		shared = err == nil && info.Mode()&os.ModeSocket != 0
+	}
+	if shared {
+		resolved, err := resolveCodexBinary(c.cfg.CodexBin)
+		if err != nil {
+			return errors.New("无法找到 Codex 程序")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, resolved.Path, "app-server", "daemon", "restart")
+		command.Env = append(os.Environ(), resolved.ExtraEnv...)
+		command.Env = append(command.Env, "CODEX_HOME="+c.cfg.CodexHome)
+		if err = command.Run(); err != nil {
+			return errors.New("Codex daemon 重启失败，请检查工作站进程")
+		}
+	}
+	if transport != nil {
+		c.disconnectLocked(transport, generation, "user reloaded account configuration")
+	}
+	return nil
 }

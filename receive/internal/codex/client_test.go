@@ -326,29 +326,19 @@ func TestClientConfigSeparatesWorkspaceAndTargetChecks(t *testing.T) {
 	}
 }
 
-func TestServerRequestRequiresAuthorizedThread(t *testing.T) {
-	transport := &memoryTransport{}
-	emitted := 0
-	client := &Client{
-		cfg: Config{Emit: func(any) { emitted++ }}, current: transport, ready: true, generation: 3,
-		requests: make(map[string]pendingServerRequest), activeTurns: make(map[string]struct{}),
-		authorizedThreads: make(map[string]struct{}),
+func TestTrustedWorkstationCanAnswerWithoutAuditEvidence(t *testing.T) {
+	client, transport, _ := newMultiAgentTestClient(3)
+	client.cfg.CheckPath = nil
+	client.handleServerRequest(rpcEnvelope{ID: json.RawMessage(`21`), Method: "item/fileChange/requestApproval", Params: json.RawMessage(`{"threadId":"unlisted","turnId":"turn","itemId":"file"}`)}, transport, 3)
+	requests := client.PendingRequests()
+	if len(requests) != 1 || !requests[0].CanAccept {
+		t.Fatalf("extra access gate: %+v", requests)
 	}
-	envelope := rpcEnvelope{
-		ID: json.RawMessage(`21`), Method: "item/fileChange/requestApproval",
-		Params: json.RawMessage(`{"threadId":"thread-safe","turnId":"turn-1","itemId":"item-1"}`),
+	if err := client.Respond(context.Background(), requests[0].Key, json.RawMessage(`{"decision":"accept"}`)); err != nil {
+		t.Fatal(err)
 	}
-	client.handleServerRequest(envelope, transport, 3)
-	if len(client.requests) != 0 || len(transport.writes) != 1 || emitted != 0 {
-		t.Fatalf("unauthorized request leaked: pending=%d writes=%d events=%d", len(client.requests), len(transport.writes), emitted)
-	}
-	client.AuthorizeThread("thread-safe")
-	client.handleServerRequest(envelope, transport, 3)
-	if len(client.requests) != 1 || emitted != 1 {
-		t.Fatalf("authorized request was not exposed: pending=%d events=%d", len(client.requests), emitted)
-	}
-	for _, request := range client.requests {
-		request.Timer.Stop()
+	if len(transport.snapshotWrites()) != 1 {
+		t.Fatal("approval not delivered")
 	}
 }
 
@@ -729,4 +719,56 @@ func TestChildCandidateBacklogIsBounded(t *testing.T) {
 		t.Fatal("queue accepted an event beyond the byte bound")
 	}
 	client.mu.Unlock()
+}
+
+func TestUnloadedThreadResumesOnceBeforeRetryingTurn(t *testing.T) {
+	client, transport, _ := newMultiAgentTestClient(1)
+	done := make(chan error, 1)
+	go func() {
+		_, rpcErr, err := client.Call(context.Background(), "turn/start", json.RawMessage(`{"threadId":"saved-thread","input":[{"type":"text","text":"continue"}]}`))
+		if rpcErr != nil {
+			err = rpcErr
+		}
+		done <- err
+	}()
+	first := waitForRPCMethod(t, transport, "turn/start")
+	client.handleReply(rpcEnvelope{ID: first.ID, Error: json.RawMessage(`{"code":-32600,"message":"thread not found: saved-thread"}`)})
+	resume := waitForRPCMethod(t, transport, "thread/resume")
+	client.handleReply(rpcEnvelope{ID: resume.ID, Result: json.RawMessage(`{"thread":{"id":"saved-thread"}}`)})
+	deadline := time.Now().Add(time.Second)
+	for len(transport.snapshotWrites()) < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	writes := transport.snapshotWrites()
+	if len(writes) != 3 {
+		t.Fatalf("want start, resume, start; got %d", len(writes))
+	}
+	var retry rpcEnvelope
+	_ = json.Unmarshal(writes[2], &retry)
+	if retry.Method != "turn/start" || string(retry.Params) != string(first.Params) {
+		t.Fatal("retry changed the original submission")
+	}
+	client.handleReply(rpcEnvelope{ID: retry.ID, Result: json.RawMessage(`{"turn":{"id":"new-turn"}}`)})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("call did not finish")
+	}
+}
+
+func TestReloadDoesNotInterruptActiveTurn(t *testing.T) {
+	transport := &memoryTransport{}
+	client := &Client{current: transport, activeTurns: map[string]struct{}{"turn": {}}}
+	if err := client.Reload(); err == nil || transport.closed {
+		t.Fatal("active turn was reloaded")
+	}
+	client.activeTurns = map[string]struct{}{}
+	client.cfg.Logger = log.New(io.Discard, "", 0)
+	client.cfg.Emit = func(any) {}
+	if err := client.Reload(); err != nil || !transport.closed {
+		t.Fatalf("idle reload failed: %v", err)
+	}
 }
