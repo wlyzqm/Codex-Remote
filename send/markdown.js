@@ -84,7 +84,8 @@
       return stash(`<code>${escapeHtml(code)}</code>`);
     });
 
-    const markdownLink = /(!?)\[([^\]\n]*)\]\(\s*(<[^>\n]+>|(?:[^()\s]+|\([^()\s]*\))+)(?:\s+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))?\s*\)/g;
+    // A streamed link may lack its closing ')'; nested repetition here blocks the UI.
+    const markdownLink = /(!?)\[([^\]\n]*)\]\(\s*(<[^>\n]+>|(?:[^()\s]|\([^()\s]*\))+)(?:\s+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))?\s*\)/g;
     source = source.replace(markdownLink, (_match, image, label, rawDestination, titleA, titleB, titleC) => {
       const destination = rawDestination.startsWith("<") && rawDestination.endsWith(">") ? rawDestination.slice(1, -1) : rawDestination;
       const title = titleA || titleB || titleC || "";

@@ -10,7 +10,7 @@ function appInternals(elements = {}, globals = {}, overrides = {}) {
   const replacements = Object.keys(overrides).map((name) => `${name} = globalThis.__testOverrides.${name};`).join("\n");
   const source = fs.readFileSync(path, "utf8").replace(
     /\n\}\)\(\);\s*$/,
-    `\n ${replacements}\n  globalThis.__appTest = { renderTimeline, renderProjectDirectory, state, loadThreads, renderGoalUsage, scheduleStateRefresh, saveComposerDraft, restoreComposerDraft, composerDraft, saveSubmission, readSubmission, sendComposer, deliverComposerSubmission, createThread, HttpError, mergeLiveThreadSnapshot, mergeTimelineItem, incrementalReasoningItem, rateWindowHtml, renderItem, codeLanguage, highlightSource, resolveLocalImage, visibleChildTurns, composerDeliveryAccepted, setComposerDelivery, renderComposerDelivery, dismissComposerDelivery };\n})();`,
+    `\n ${replacements}\n  globalThis.__appTest = { renderTimeline, renderProjectDirectory, state, loadThreads, renderGoalUsage, scheduleStateRefresh, saveComposerDraft, restoreComposerDraft, composerDraft, saveSubmission, readSubmission, sendComposer, deliverComposerSubmission, createThread, HttpError, upsertTurn, appendItemField, mergeLiveThreadSnapshot, mergeTimelineItem, incrementalReasoningItem, rateWindowHtml, renderItem, codeLanguage, highlightSource, resolveLocalImage, visibleChildTurns, composerDeliveryAccepted, setComposerDelivery, renderComposerDelivery, dismissComposerDelivery };\n})();`,
   );
   const context = { document: { addEventListener() {}, querySelector: (selector) => elements[selector] || null, querySelectorAll: () => [] }, window: {}, console, __testOverrides: overrides, ...globals };
   vm.runInNewContext(source, context, { filename: path });
@@ -41,7 +41,7 @@ test("live refresh keeps streaming controls that are absent from a thread snapsh
 
   const merged = mergeLiveThreadSnapshot(previous, snapshot);
   assert.equal(merged.preview, "新");
-  assert.deepEqual(merged.turns[0].items.map((item) => item.type), ["userMessage", "reasoning", "commandExecution", "agentMessage"]);
+  assert.deepEqual(Array.from(merged.turns[0].items, (item) => item.type), ["userMessage", "reasoning", "commandExecution", "agentMessage"]);
   assert.equal(merged.turns[0].items[0].id, "server-user");
   assert.equal(merged.turns[0].items[0].deliveryState, "accepted");
   assert.deepEqual(merged.turns[0].items[1].summary, ["仍在推理"]);
@@ -55,6 +55,40 @@ test("rate windows render remaining instead of used quota", () => {
   assert.match(html, /剩余 27%/);
   assert.match(html, /class="rate-meter warn"[^>]+value="27"/);
   assert.doesNotMatch(html, /已使用/);
+});
+
+test("partial turn events preserve streamed history and snapshots restore chronological order", () => {
+  const { state, upsertTurn, appendItemField, mergeLiveThreadSnapshot } = appInternals({}, {}, { scheduleTimelineRender() {} });
+  const items = [
+    { id: "user", type: "userMessage", content: [{ type: "text", text: "检查项目" }] },
+    { id: "progress", type: "agentMessage", text: "正在检查" },
+    { id: "command", type: "commandExecution", command: "pwd" },
+    { id: "answer", type: "agentMessage", text: "结论", phase: "final_answer" },
+  ];
+  state.selectedThread = { id: "thread", turns: [{ id: "turn", status: "inProgress", items }] };
+  const snapshot = structuredClone(state.selectedThread);
+  // A late turn/start response must not erase items already delivered by SSE.
+  upsertTurn({ id: "turn", status: "inProgress", items: [] });
+  appendItemField("turn", "answer", "agentMessage", "text", "继续输出");
+  state.selectedThread = mergeLiveThreadSnapshot(state.selectedThread, snapshot);
+  appendItemField("turn", "answer", "agentMessage", "text", "，完成");
+  const answer = { ...items[3], text: "结论继续输出，完成" };
+  // The real turn/completed notification contains only the final answer.
+  upsertTurn({ id: "turn", status: "completed", items: [answer] });
+  assert.equal(state.selectedThread.turns[0].status, "completed");
+  assert.deepEqual(Array.from(state.selectedThread.turns[0].items, item => item.id), items.map(item => item.id));
+  assert.equal(state.selectedThread.turns[0].items.at(-1).text, answer.text);
+
+  const complete = { id: "thread", turns: [{ id: "turn", status: "completed", items: [...items.slice(0, -1), answer] }] };
+  // Recover a page already reduced to the answer, or previously reordered by polling.
+  for (const history of [[answer], [answer, ...items.slice(0, -1)]]) {
+    const previous = { id: "thread", turns: [{ id: "turn", status: "completed", items: history }] };
+    const merged = mergeLiveThreadSnapshot(previous, complete);
+    assert.deepEqual(Array.from(merged.turns[0].items, item => item.id), items.map(item => item.id));
+  }
+  const live = { id: "thread", turns: [{ id: "turn", status: "inProgress", items: items.slice(0, -1) }] };
+  const sparse = { id: "thread", turns: [{ id: "turn", status: "completed", items: [items[0], items[1], answer] }] };
+  assert.deepEqual(Array.from(mergeLiveThreadSnapshot(live, sparse).turns[0].items, item => item.id), items.map(item => item.id));
 });
 
 test("completed empty reasoning is hidden instead of shown as active", () => {

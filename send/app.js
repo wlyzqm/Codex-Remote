@@ -3690,18 +3690,13 @@
       const previous = state.selectedThread.turns[index];
       const next = { ...previous, ...turn };
       if (Array.isArray(turn.items)) {
-        const incomingIds = new Set(turn.items.map((item) => item?.id).filter(Boolean));
-        next.items = turn.items.map((item) => {
-          const current = previous.items?.find((candidate) => candidate.id === item.id);
-          return current ? mergeTimelineItem(current, item) : item;
-        });
-        for (const current of previous.items || []) {
-          if (!incomingIds.has(current.id) && (current.type === "turnDiff" || current.terminalInteractions?.length)) next.items.push(current);
-        }
-        if ((turn.status || previous.status) === "inProgress") {
-          for (const pending of (previous.items || []).filter((item) => item.remotePending)) {
-            if (!turn.items.some((item) => item.type === "userMessage" && sameUserMessage(pending, item))) next.items.push(pending);
-          }
+        // Turn notifications and turn/start responses can contain only a subset of items.
+        next.items = [...(previous.items || [])];
+        for (const item of turn.items) {
+          const itemIndex = next.items.findIndex((candidate) => candidate.id === item.id ||
+            (candidate.remotePending && item.type === "userMessage" && sameUserMessage(candidate, item)));
+          if (itemIndex < 0) next.items.push(item);
+          else next.items[itemIndex] = mergeTimelineItem(next.items[itemIndex], item);
         }
       }
       state.selectedThread.turns[index] = next;
@@ -3719,18 +3714,22 @@
         continue;
       }
       const active = (turn.status || previousTurn.status) === "inProgress";
-      const snapshotItems = turn.items;
+      const snapshotItems = [...turn.items];
       const consumed = new Set();
-      turn.items = (previousTurn.items || []).flatMap((liveItem) => {
+      let insertionIndex = 0;
+      // Snapshots define history order; retain live-only items beside their preceding anchor.
+      for (const liveItem of previousTurn.items || []) {
         const index = snapshotItems.findIndex((item, itemIndex) => !consumed.has(itemIndex) && sameTimelineItem(item, liveItem));
         if (index < 0) {
-          if (snapshotItems.some((item) => sameTimelineItem(item, liveItem))) return [];
-          return active || !["userMessage", "agentMessage"].includes(liveItem.type) ? [liveItem] : [];
+          if (snapshotItems.some((item) => sameTimelineItem(item, liveItem))) continue;
+          if (active || !["userMessage", "agentMessage"].includes(liveItem.type)) turn.items.splice(insertionIndex++, 0, liveItem);
+          continue;
         }
         consumed.add(index);
-        return [mergeTimelineItem(liveItem, snapshotItems[index])];
-      });
-      turn.items.push(...snapshotItems.filter((_, index) => !consumed.has(index)));
+        insertionIndex = turn.items.indexOf(snapshotItems[index]);
+        turn.items[insertionIndex] = mergeTimelineItem(liveItem, snapshotItems[index]);
+        insertionIndex++;
+      }
     }
     return next;
   }

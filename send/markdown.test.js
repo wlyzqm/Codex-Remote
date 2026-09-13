@@ -106,3 +106,17 @@ test("renders every streaming prefix without producing active HTML", () => {
     assert.doesNotMatch(html, /href="javascript:/i);
   }
 });
+
+test("unfinished streamed links never block rendering", () => {
+  // A separate process makes a regex regression fail instead of hanging the test runner.
+  require("node:child_process").execFileSync(process.execPath, ["-e", `
+    const assert = require('node:assert/strict');
+    const markdown = require(${JSON.stringify(require.resolve("./markdown.js"))});
+    const stream = '| 功能 | 说明 |\\n|---|---|\\n| 门禁 | [后端门禁](/opt/project/src/auth/account_context.mjs:124) |\\n\\n' +
+      '[文档](https://example.com/' + 'long-path/'.repeat(20) + '(section) "说明")';
+    for (let length = 0; length <= stream.length; length++) markdown.render(stream.slice(0, length));
+    assert.match(markdown.render(stream), /data-copy-path="\\/opt\\/project\\/src\\/auth\\/account_context.mjs:124"/);
+    assert.match(markdown.render(stream), /\\(section\\)"/);
+    assert.match(markdown.render(stream), /title="说明"/);
+  `], { timeout: 2000, stdio: "pipe" });
+});
