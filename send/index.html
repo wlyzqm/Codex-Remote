@@ -10,7 +10,7 @@
     <link rel="manifest" href="./manifest.webmanifest?v=20260831.3">
     <link rel="icon" href="./icon.png?v=20260831.1" type="image/png" sizes="640x640">
     <link rel="apple-touch-icon" href="./icon.png?v=20260831.1">
-    <link rel="stylesheet" href="./styles.css?v=20260907.3">
+    <link rel="stylesheet" href="./styles.css?v=20260914.5">
     <title>Codex Remote</title>
   </head>
   <body>
@@ -72,7 +72,7 @@
       <header class="topbar">
         <button class="brand" type="button" data-route="threads" aria-label="返回会话列表">
           <span class="brand-block">CR</span>
-          <span class="mobile-brand-title">会话</span>
+          <span class="mobile-brand-title">Codex Remote</span>
           <span class="brand-copy"><b>Codex Remote</b><small>远程工作台</small></span>
         </button>
         <div class="topbar-actions">
@@ -349,15 +349,54 @@
         <header class="modal-header"><div><h2>连接状态与设置</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
         <div class="modal-body">
           <section class="status-hero"><span id="statusHeroLamp" class="connection-lamp"></span><div><strong id="statusHeroTitle">正在连接</strong><small id="statusHeroDetail">等待工作站响应</small></div><button id="reconnectButton" class="quiet-button" type="button"><svg><use href="#i-refresh"/></svg>重连</button></section>
-          <h3 class="settings-heading">显示</h3><section class="status-control theme-control"><div><strong>界面主题</strong><small>仅保存在当前浏览器</small></div><select id="themeSelect" aria-label="界面主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></section>
+          <section class="status-control"><div><strong id="currentAccountName">管理员</strong><small id="currentAccountScope">工作站账户</small></div><button id="openUsers" class="quiet-button" type="button" hidden>用户与权限</button></section>
+          <section id="accountViewControl" class="status-control" hidden><div><strong><label for="accountView">查看账户</label></strong><small id="accountViewHint">切换查看该账户的会话与附件</small></div><select id="accountView" aria-describedby="accountViewHint"><option value="">管理员</option></select></section>
+          <h3 class="settings-heading">显示</h3><section class="status-control"><div><strong>界面主题</strong><small>仅保存在当前浏览器</small></div><select id="themeSelect" aria-label="界面主题"><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></section>
           <section class="status-control text-size-control"><div><strong>正文字号</strong><small>消息、推理与操作记录共用此字号</small></div><label class="text-size-picker" for="bodyTextSize"><input id="bodyTextSize" type="range" min="14" max="18" step="1" value="16" aria-label="正文字号"><output id="bodyTextSizeValue" for="bodyTextSize">16 px</output></label></section>
           <section class="settings-section"><div class="section-title"><span>账户剩余额度</span><button id="refreshRates" class="text-button" type="button">刷新</button></div><div id="rateLimits" class="rate-limits"></div></section>
-          <section class="status-control"><div><strong>Codex 工作站认证</strong><small>编辑配置，切换 API 或官方 OAuth 账户</small></div><button id="openCodexSettings" class="quiet-button" type="button">管理配置</button></section>
-          <div id="clientUpdateNotice" hidden role="status">工作站版本已更新，刷新以使用对应客户端。<button id="reloadClientButton" class="text-button" type="button">刷新页面</button></div>
+          <section id="workstationAuthControl" class="status-control"><div><strong>Codex 工作站认证</strong><small>编辑配置，切换 API 或官方 OAuth 账户</small></div><button id="openCodexSettings" class="quiet-button" type="button">管理配置</button></section>
+          <section id="clientUpdateNotice" class="status-control" hidden role="status"><div><strong>界面已更新</strong><small>刷新页面以加载最新版本</small></div><button id="reloadClientButton" class="quiet-button" type="button">刷新页面</button></section>
           <details class="raw-status"><summary>连接与设备诊断</summary><pre id="diagnostics"></pre><button id="copyDiagnostics" class="quiet-button" type="button">复制诊断</button></details>
           <details class="raw-status"><summary>原始后端状态</summary><pre id="rawStatus">暂无数据</pre></details>
           <button id="logoutButton" class="logout-button" type="button">退出当前设备</button>
         </div>
+      </div>
+    </dialog>
+
+
+    <dialog id="announcementDialog" class="modal announcement-modal" aria-labelledby="announcementTitle" aria-describedby="announcementIntro">
+      <div class="dialog-frame">
+        <header class="modal-header"><div><h2 id="announcementTitle">系统公告</h2><p id="announcementIntro" class="settings-hint">进入工作台前，请阅读以下公告</p></div></header>
+        <div class="modal-body"><div id="announcementText" tabindex="0"></div><p id="announcementError" role="alert" hidden></p></div>
+        <footer class="modal-footer"><button id="acknowledgeAnnouncement" class="primary-button" type="button">我已悉知</button></footer>
+      </div>
+    </dialog>
+
+    <dialog id="usersDialog" class="modal sheet-modal users-modal" aria-labelledby="usersTitle">
+      <div class="dialog-frame">
+        <header class="modal-header"><div><h2 id="usersTitle">用户与权限</h2><p class="settings-hint">原工作站密码始终登录管理员，拥有全部权限。</p></div><button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg><use href="#i-close"/></svg></button></header>
+        <form id="userForm" class="modal-body">
+          <div class="settings-actions"><label for="userSelect">用户</label><select id="userSelect" aria-label="选择用户"><option value="">新建用户</option></select><button id="newUser" class="quiet-button" type="button">新建</button></div>
+          <div class="user-fields">
+            <label>显示名称<input id="userName" required maxlength="80" autocomplete="off"></label>
+            <label>独立工作站密码<input id="userPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" aria-describedby="userPasswordHint"><small id="userPasswordHint">至少 12 字节；编辑时留空保留原密码。</small></label>
+            <label class="user-wide">系统公告<textarea id="userAnnouncement" rows="5" maxlength="10000" placeholder="填写该用户登录后需要阅读的公告" aria-describedby="userAnnouncementHint"></textarea><small id="userAnnouncementHint">留空不展示。该用户每次登录须点击“我已悉知”后进入工作台，同一次登录刷新不重复展示；管理员不展示。</small></label>
+            <label class="user-wide">允许的工作区<textarea id="userWorkspaces" required rows="3" spellcheck="false" placeholder="/opt/project-a&#10;/opt/project-b"></textarea><small>每行一个已有绝对目录。分配同一目录的用户会共享该目录中的项目文件，会话与附件仍独立。</small></label>
+            <label>文件权限<select id="userAccess"><option value="read-only">只读工作区</option><option value="workspace-write">工作区读写</option></select></label>
+            <div class="user-switches"><label><input id="userNetwork" type="checkbox">允许任务访问网络</label><label><input id="userDisabled" type="checkbox">停用此账户</label></div>
+            <fieldset class="user-wide"><legend>功能权限</legend><div id="userPermissions" class="user-checks">
+              <label><input type="checkbox" value="chat" checked>发起与管理会话</label><label><input type="checkbox" value="files" checked>浏览与下载文件</label><label><input type="checkbox" value="uploads" checked>管理附件</label><label><input type="checkbox" value="requests" checked>处理交互请求</label><label><input type="checkbox" value="goals">管理目标</label><label><input type="checkbox" value="review">代码审查</label><label><input type="checkbox" value="archive">归档会话</label>
+            </div></fieldset>
+            <label class="user-wide">允许的模型<textarea id="userModels" rows="2" spellcheck="false" placeholder="留空允许工作站提供的全部模型；每行一个模型 ID"></textarea><small id="userModelHint"></small></label>
+            <fieldset class="user-wide"><legend>允许的思考强度（全不选表示不限）</legend><div id="userEfforts" class="user-checks">
+              <label><input type="checkbox" value="none">无</label><label><input type="checkbox" value="minimal">最低</label><label><input type="checkbox" value="low">低</label><label><input type="checkbox" value="medium">中</label><label><input type="checkbox" value="high">高</label><label><input type="checkbox" value="xhigh">超高</label><label><input type="checkbox" value="max">最大</label><label><input type="checkbox" value="ultra">极限</label>
+            </div></fieldset>
+            <label class="user-wide">允许的服务等级<input id="userServiceTiers" placeholder="例如 default, fast；留空不限" autocomplete="off"><small>使用模型提供的等级 ID，逗号分隔；default 表示标准等级。范围中的第一项为默认值。</small></label>
+          </div>
+          <p class="settings-hint">保存、停用或删除会撤销该用户的旧登录并终止其正在运行的任务。删除账户保留工作区文件与历史目录。</p>
+          <p id="userMessage" class="settings-hint" role="status" aria-live="polite"></p>
+          <div class="settings-actions"><button id="deleteUser" class="danger-text-button" type="button" hidden>删除用户</button><button id="saveUser" class="primary-button" type="submit">创建用户</button></div>
+        </form>
       </div>
     </dialog>
 
@@ -370,6 +409,6 @@
 
     <div id="toastRegion" class="toast-region" role="status" aria-live="polite"></div>
     <script src="./markdown.js?v=20260913.1" defer></script>
-    <script src="./app.js?v=20260913.1" defer></script>
+    <script src="./app.js?v=20260914.5" defer></script>
   </body>
 </html>

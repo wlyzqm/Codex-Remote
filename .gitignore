@@ -7,3 +7,5 @@ receive/state/
 *.key
 *.p12
 *.pfx
+
+.codex/

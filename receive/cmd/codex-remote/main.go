@@ -24,7 +24,7 @@ import (
 	"codex-remote/internal/server"
 )
 
-var version = "0.7.1"
+var version = "0.8.1"
 
 type stringList []string
 
@@ -128,8 +128,9 @@ func runServe(args []string) error {
 	}
 	defer backend.Close()
 	web, err = server.New(server.Config{
-		CodexHome: *codexHome,
-		Password:  authConfig.Password, SessionKey: sessionKey, WebRoot: *webRoot, SessionTTL: *sessionTTL,
+		CodexHome:    *codexHome,
+		PasswordFile: *configPath,
+		Password:     authConfig.Password, SessionKey: sessionKey, WebRoot: *webRoot, SessionTTL: *sessionTTL,
 		GeneratedImagesRoot: filepath.Join(*codexHome, "generated_images"), UploadRoot: uploadRoot,
 		TrustedProxy: *trustedProxy, Version: version, Logger: logger, Paths: paths,
 	}, backend, broker)
@@ -137,6 +138,9 @@ func runServe(args []string) error {
 		return err
 	}
 
+	if err = web.EnableUsers(web.UserFactory()); err != nil {
+		return err
+	}
 	httpServer := &http.Server{
 		Addr:              *listen,
 		Handler:           web.Handler(),

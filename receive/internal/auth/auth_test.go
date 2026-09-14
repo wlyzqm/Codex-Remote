@@ -3,6 +3,7 @@ package auth
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,5 +62,30 @@ func TestConfigRejectsUnsafeOrAmbiguousInput(t *testing.T) {
 				t.Fatal("unsafe config was accepted")
 			}
 		})
+	}
+}
+
+func TestAccountCookieBindsIdentityAndExpiry(t *testing.T) {
+	now := time.Now()
+	token, err := IssueAccountSession("secret-key", "alice:revision-1", now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, valid := SessionAccount("secret-key", token, now)
+	if !valid || id != "alice:revision-1" {
+		t.Fatal("valid account cookie rejected")
+	}
+	_, signature, ok := strings.Cut(token, "~")
+	if !ok {
+		t.Fatal("missing account")
+	}
+	if _, valid = SessionAccount("secret-key", signature, now); valid {
+		t.Fatal("user cookie downgraded to administrator")
+	}
+	if _, valid = SessionAccount("another-key", token, now); valid {
+		t.Fatal("wrong signing key accepted")
+	}
+	if _, valid = SessionAccount("secret-key", token, now.Add(time.Minute)); valid {
+		t.Fatal("expired account cookie accepted")
 	}
 }

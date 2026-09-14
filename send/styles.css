@@ -2306,8 +2306,10 @@ pre {
 .status-control strong { font-size: 12px; }
 .status-control small { color: var(--bone-600); font-size: 9px; line-height: 1.45; }
 .notification-control button.active { color: var(--green); border-color: rgba(85, 211, 154, .3); }
-.theme-control select {
-  min-width: 132px;
+.status-control > select {
+  width: 132px;
+  min-width: 0;
+  max-width: 100%;
   height: 40px;
   padding: 0 34px 0 12px;
   border: 1px solid var(--line-strong);
@@ -2534,7 +2536,6 @@ pre {
   .status-hero .quiet-button { grid-column: 1 / -1; }
   .status-control { grid-template-columns: 1fr; }
   .status-control button { min-height: 42px; }
-  .theme-control select { width: 100%; }
   .elicitation-checks { grid-template-columns: 1fr; }
   .terminal-interactions > div { grid-template-columns: 1fr; gap: 3px; }
 
@@ -4882,14 +4883,18 @@ body,
   box-shadow: none;
 }
 
-.terminal-kicker {
-  position: fixed;
-  top: calc(40px + var(--safe-top));
-  left: calc(44px + var(--safe-left));
+.terminal-kicker,
+.mobile-brand-title {
   color: var(--bone-100);
   font-size: 16px;
   font-weight: 700;
   letter-spacing: -.02em;
+}
+
+.terminal-kicker {
+  position: fixed;
+  top: calc(40px + var(--safe-top));
+  left: calc(44px + var(--safe-left));
 }
 
 .login-panel h1 {
@@ -5249,17 +5254,20 @@ body,
   .topbar {
     height: calc(52px + var(--safe-top));
     min-height: calc(52px + var(--safe-top));
-    padding: var(--safe-top) max(8px, var(--safe-right)) 0 max(8px, var(--safe-left));
+    padding: var(--safe-top) max(12px, var(--safe-right)) 0 max(12px, var(--safe-left));
+    gap: 8px;
   }
 
   .topbar .brand {
-    position: absolute;
-    left: 50%;
-    transform: translateX(-50%);
+    position: static;
+    margin-right: auto;
+    transform: none;
+    flex-shrink: 0;
+    white-space: nowrap;
   }
   .brand-copy { display: none; }
-  .mobile-brand-title { display: inline; color: var(--bone-100); font-size: 16px; font-weight: 720; }
-  .topbar-actions { margin-left: auto; gap: 4px; }
+  .mobile-brand-title { display: inline; }
+  .topbar-actions { margin-left: auto; gap: 4px; flex-shrink: 0; }
   .topbar-new-thread,
   #requestsButton,
   #uploadsButton,
@@ -5352,12 +5360,6 @@ body,
 :root[data-resolved-theme="light"] .topbar-actions svg { color: inherit; }
 
 @media (max-width: 720px) {
-  .topbar .brand {
-    position: static;
-    margin-right: auto;
-    transform: none;
-  }
-
   :root[data-resolved-theme="light"] .app-view.mobile-detail .detail-header > .mobile-back,
   :root[data-resolved-theme="light"] .app-view.mobile-detail .detail-header #threadMenuButton {
     border-color: var(--line-strong);
@@ -5551,7 +5553,6 @@ body,
 .push-device small { display:block; color:var(--bone-400); }
 .push-device button { min-height:44px; }
 #diagnostics { white-space:pre-wrap; overflow-wrap:anywhere; }
-#clientUpdateNotice { padding:12px; color:var(--submission-warning); }
 
 
 /* Settings use one row rhythm across connection, appearance and account controls. */
@@ -5587,15 +5588,15 @@ body,
 }
 
 /* Shared controls for the settings, editor and project preview surfaces. */
-:is(.status-modal, .codex-settings-modal) :is(.quiet-button, .secondary-button, .primary-button, .text-button),
+:is(.status-modal, .codex-settings-modal, .users-modal) :is(.quiet-button, .secondary-button, .primary-button, .text-button),
 .project-selection :is(button), .project-files-toolbar .quiet-button {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   min-height: 40px; height: 40px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 6px;
   color: var(--bone-100); background: var(--theme-surface); font-size: 13px; font-weight: 550; line-height: 1; box-shadow: none; white-space: nowrap;
 }
-:is(.status-modal, .codex-settings-modal) .primary-button { color: var(--theme-surface); background: var(--amber); border-color: var(--amber); }
-:is(.status-modal, .codex-settings-modal) :is(.quiet-button, .secondary-button, .text-button):hover { background: var(--theme-muted); }
-:is(.status-modal, .codex-settings-modal) .icon-button { width: 40px; height: 40px; min-width: 40px; min-height: 40px; border: 1px solid var(--line-strong); border-radius: 6px; }
+:is(.status-modal, .codex-settings-modal, .users-modal) .primary-button { color: var(--theme-surface); background: var(--amber); border-color: var(--amber); }
+:is(.status-modal, .codex-settings-modal, .users-modal) :is(.quiet-button, .secondary-button, .text-button):hover { background: var(--theme-muted); }
+:is(.status-modal, .codex-settings-modal, .users-modal) .icon-button { width: 40px; height: 40px; min-width: 40px; min-height: 40px; border: 1px solid var(--line-strong); border-radius: 6px; }
 .status-modal { width: min(calc(100vw - 32px), 640px); }
 .status-modal .modal-body { padding: 8px 20px 20px; }
 .status-modal .status-control { padding: 14px 0; }
@@ -5660,4 +5661,38 @@ body,
 @media (forced-colors: active) {
   .code-editor-panel > pre { visibility: hidden; }
   .code-editor-panel > textarea { color: CanvasText; -webkit-text-fill-color: CanvasText; }
+}
+
+/* Account settings reuse the workstation form controls and theme. */
+.user-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 22px 0; }
+.user-fields > label { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.user-fields small { color: var(--bone-400); line-height: 1.6; }
+.user-wide { grid-column: 1 / -1; }
+.user-fields fieldset { border: 1px solid var(--line-strong); border-radius: 10px; padding: 14px; min-width: 0; }
+.user-checks { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+.user-checks label, .user-switches label { display: flex; align-items: center; gap: 8px; min-height: 40px; }
+.user-fields input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 auto; }
+.user-fields textarea { resize: vertical; min-height: 72px; }
+#userSelect { max-width: 65%; }
+#userMessage[data-error="true"] { color: var(--red); }
+@media (max-width: 520px) { .user-fields { grid-template-columns: 1fr; } .user-wide { grid-column: auto; } }
+
+.users-modal { width: min(calc(100vw - 32px), 760px); }
+.users-modal .modal-body { display: block; padding: 20px; }
+.users-modal input:not([type="checkbox"]), .users-modal select, .users-modal textarea { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--bone-100); background: var(--theme-surface); font: inherit; font-size: 14px; }
+.users-modal .settings-actions { align-items: center; }
+.users-modal input:focus-visible, .users-modal select:focus-visible, .users-modal textarea:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+@media (max-width: 720px) { .users-modal { width: 100%; } .users-modal .modal-body { padding: 16px; } }
+
+
+.announcement-modal { width: min(calc(100vw - 32px), 560px); max-height: min(85dvh, 720px); margin: auto; border-radius: 12px; }
+.announcement-modal .modal-body { display: block; }
+#announcementText { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.75; }
+#announcementError { color: var(--red); }
+.announcement-modal .modal-footer button { min-height: 44px; }
+
+
+@media (max-width: 360px) {
+  .topbar { padding-right: max(8px, var(--safe-right)); padding-left: max(8px, var(--safe-left)); gap: 4px; }
+  .topbar-actions { gap: 2px; }
 }

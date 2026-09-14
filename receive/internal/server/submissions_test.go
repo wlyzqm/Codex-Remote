@@ -128,3 +128,31 @@ func TestUpgradeReplaysOldAcknowledgementWithoutSubmitting(t *testing.T) {
 		}
 	}
 }
+
+func TestRejectedLaunchOnlyClearsRecoveryWhenNeverSubmitted(t *testing.T) {
+	s, backend, password := newTestServerInstance(t, false)
+	cookie := loginCookie(t, s.Handler(), password)
+	id := "invalid-workspace-submission-0001"
+	body := `{"clientRequestId":"` + id + `","method":"thread/start","params":{"cwd":"/"}}`
+	for _, hasRecord := range []bool{false, true} {
+		if hasRecord {
+			if err := os.MkdirAll(filepath.Dir(s.submissionPath(id)), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(s.submissionPath(id), []byte(`{"status":0}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		response := doRequest(s.Handler(), http.MethodPost, "/api/rpc", body, cookie, "")
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("invalid root accepted: %d", response.Code)
+		}
+		provenUnsent := strings.Contains(response.Body.String(), "submission_not_sent")
+		if provenUnsent == hasRecord {
+			t.Fatalf("unsafe recovery classification (record=%v): %s", hasRecord, response.Body.String())
+		}
+	}
+	if len(backend.calls) != 0 {
+		t.Fatalf("invalid workspace reached backend: %v", backend.calls)
+	}
+}

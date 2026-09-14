@@ -70,6 +70,9 @@ func (s *Server) saveActivityLocked() error {
 	return os.Rename(file.Name(), s.activityPath())
 }
 func (s *Server) Observe(data []byte) {
+	if s.users != nil && s.cfg.User == nil {
+		s.users.observe(data)
+	}
 	var event struct {
 		Type, Method, Key, Reason string
 		Connected                 bool

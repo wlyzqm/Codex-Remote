@@ -13,6 +13,10 @@
 
   const state = {
     authenticated: false,
+    announcementPending: false,
+    user: null,
+    admin: true,
+    users: [],
     threads: [],
     models: [],
     archived: false,
@@ -84,6 +88,16 @@
     projectFilesParent: "",
   };
 
+  function accountStorageKey(key) {
+    const id = state.user?.id;
+    return !id || id === "admin" || key === THEME_STORAGE_KEY || key === TEXT_SIZE_STORAGE_KEY ? key : `codex-remote:user:${id}:${key}`;
+  }
+  const accountStorage = {
+    getItem: (key) => localStorage.getItem(accountStorageKey(key)),
+    setItem: (key, value) => localStorage.setItem(accountStorageKey(key), value),
+    removeItem: (key) => localStorage.removeItem(accountStorageKey(key)),
+  };
+
   class HttpError extends Error {
     constructor(message, status, payload) {
       super(message);
@@ -101,12 +115,21 @@
   async function bootstrap() {
     loadThemePreference();
     loadTextSizePreference();
-    loadStoredWorkspaceDirectories();
     bindEvents();
     registerServiceWorker();
     try {
       const session = await request("/api/session");
       if (session && session.authenticated === false) throw new HttpError("登录已失效", 401, session);
+      state.user = session.user || { id: "admin", name: "管理员" };
+      state.admin = session.admin !== false;
+      state.announcementPending = !state.admin && Boolean(session.announcementPending);
+      if (state.announcementPending) {
+        state.authenticated = true;
+        $("#bootView").hidden = true;
+        $("#announcementText").textContent = state.user.announcement;
+        showDialog($("#announcementDialog"));
+        return;
+      }
       await enterApp();
     } catch (error) {
       showLogin(error.status === 401 ? "" : "暂时无法连接工作站，请检查地址后重试。");
@@ -114,7 +137,19 @@
   }
 
   function bindEvents() {
+    $("#acknowledgeAnnouncement").addEventListener("click", acknowledgeAnnouncement);
+    $("#announcementDialog").addEventListener("cancel", event => event.preventDefault());
     $("#loginForm").addEventListener("submit", handleLogin);
+    $("#openUsers").addEventListener("click", () => { closeDialog($("#statusDialog")); showDialog($("#usersDialog")); loadUsers().then(() => editUser("")).catch(error => userMessage(readableError(error), true)); });
+    $("#newUser").addEventListener("click", () => editUser(""));
+    $("#userSelect").addEventListener("change", event => editUser(event.target.value));
+    $("#userForm").addEventListener("submit", saveUser);
+    $("#deleteUser").addEventListener("click", deleteUser);
+    $("#accountView").addEventListener("change", async event => {
+      saveComposerDraft();
+      try { await request("/api/users/select", { method: "POST", body: JSON.stringify({ id: event.target.value }) }); location.replace(location.pathname); }
+      catch (error) { toast(readableError(error), "warning"); }
+    });
     $("#togglePassword").addEventListener("click", togglePasswordVisibility);
     $$('[data-action="new-thread"]').forEach((button) => button.addEventListener("click", openNewThreadDialog));
     $("#newThreadForm").addEventListener("submit", createThread);
@@ -129,7 +164,7 @@
     });
     $("#projectSelect").addEventListener("change", (event) => {
       state.selectedProject = event.target.value;
-      try { localStorage.setItem("codex-remote:selected-project", state.selectedProject); } catch {}
+      try { accountStorage.setItem("codex-remote:selected-project", state.selectedProject); } catch {}
       loadThreads(true).catch(() => {});
     });
     $("#archivedToggle").addEventListener("change", (event) => {
@@ -317,7 +352,7 @@
     });
     document.addEventListener("visibilitychange", () => {
       clearTimeout(state.refreshTimer);
-      if (document.hidden || !state.authenticated) return;
+      if (document.hidden || !state.authenticated || state.announcementPending) return;
       if (!state.sseConnected) reconnectNow();
       refreshSelectedThread(true);
       scheduleStateRefresh();
@@ -337,6 +372,7 @@
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeout || API_TIMEOUT_MS);
     const headers = new Headers(options.headers || {});
+    if (state.authenticated && state.user?.id) headers.set("X-Remote-Account", state.user.id);
     if (options.body !== undefined && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
 
     try {
@@ -356,6 +392,7 @@
       if (!response.ok) {
         const message = payload?.error?.message || payload?.message || payload?.error || `请求失败（${response.status}）`;
         if (response.status === 401 && state.authenticated) showLogin("登录已失效，请重新输入访问密码。");
+        if (payload?.error?.code === "account_changed") { disconnectEvents(); location.replace(location.pathname); }
         throw new HttpError(String(message), response.status, payload);
       }
       return payload;
@@ -390,7 +427,7 @@
     try {
       await request("/api/login", { method: "POST", body: JSON.stringify({ password }) });
       passwordInput.value = "";
-      await enterApp();
+      location.replace(location.pathname);
     } catch (error) {
       $("#loginError").textContent = readableError(error);
       $("#loginError").hidden = false;
@@ -407,8 +444,27 @@
     $("#togglePassword").setAttribute("aria-label", visible ? "显示密码" : "隐藏密码");
   }
 
+  async function acknowledgeAnnouncement() {
+    const button = $("#acknowledgeAnnouncement");
+    setBusy(button, true, "正在确认…");
+    $("#announcementError").hidden = true;
+    try {
+      await request("/api/announcement/ack", { method: "POST", body: "{}" });
+      state.announcementPending = false;
+      closeDialog($("#announcementDialog"));
+      await enterApp();
+    } catch (error) {
+      $("#announcementError").textContent = readableError(error);
+      $("#announcementError").hidden = false;
+    } finally { setBusy(button, false); }
+  }
+
   async function enterApp() {
+    if (state.announcementPending) return;
     state.authenticated = true;
+    loadStoredWorkspaceDirectories();
+    applyAccountUI();
+    if (state.admin) loadUsers().catch(() => {});
     scheduleStateRefresh();
     $("#bootView").hidden = true;
     $("#loginView").hidden = true;
@@ -432,6 +488,7 @@
   function showLogin(message = "") {
     saveComposerDraft();
     state.authenticated = false;
+    state.announcementPending = false;
     clearTimeout(state.refreshTimer);
     disconnectEvents();
     state.lastEventId = "";
@@ -447,20 +504,10 @@
 
   async function logout() {
     saveComposerDraft();
-    const button = $("#logoutButton");
-    setBusy(button, true, "正在退出…");
     try {
       await request("/api/logout", { method: "POST", body: "{}" });
-    } catch (error) {
-      toast(readableError(error), "warning");
-    } finally {
-      state.pendingRequests.clear();
-      state.composerDeliveries.clear();
-      state.selectedThread = null;
-      state.selectedId = null;
-      setBusy(button, false);
-      showLogin("");
-    }
+      location.replace(location.pathname);
+    } catch (error) { toast(readableError(error), "warning"); }
   }
 
   async function loadModels() {
@@ -473,12 +520,12 @@
       ? models.map((model) => `<option value="${escapeHtml(model.model || model.id)}"${model.isDefault ? " selected" : ""}>${escapeHtml(model.displayName || model.model || model.id)}</option>`).join("")
       : '<option value="">服务器默认</option>';
     const agentSelect = $("#subagentModelPreference");
-    const savedModel = localStorage.getItem("codex-remote:subagent-model") || "";
+    const savedModel = accountStorage.getItem("codex-remote:subagent-model") || "";
     agentSelect.innerHTML = '<option value="">继承父会话</option>' + models.map((model) => {
       const value = model.model || model.id;
       return `<option value="${escapeHtml(value)}"${value === savedModel ? " selected" : ""}>${escapeHtml(model.displayName || value)}</option>`;
     }).join("");
-    const savedEffort = localStorage.getItem("codex-remote:subagent-effort") || "";
+    const savedEffort = accountStorage.getItem("codex-remote:subagent-effort") || "";
     if ([...$("#subagentEffortPreference").options].some((option) => option.value === savedEffort)) $("#subagentEffortPreference").value = savedEffort;
     const composerModel = $("#composerModel");
     composerModel.innerHTML = '<option value="">继承会话模型</option>' + models.map((model) => `<option value="${escapeHtml(modelValue(model))}">${escapeHtml(model.displayName || modelValue(model))}</option>`).join("");
@@ -507,7 +554,7 @@
     const efforts = (model?.supportedReasoningEfforts || []).map((entry) => typeof entry === "string"
       ? { value: entry, label: effortLabel(entry) }
       : { value: entry.reasoningEffort, label: effortLabel(entry.reasoningEffort) }).filter((entry) => entry.value);
-    return [{ value: "", label: "默认" }, ...efforts];
+    return state.user?.efforts?.length ? efforts : [{ value: "", label: "默认" }, ...efforts];
   }
 
   function effortLabel(value) {
@@ -559,8 +606,8 @@
     const model = state.models.find((entry) => modelValue(entry) === selected) || state.models.find((entry) => entry.isDefault) || null;
     const tiers = serviceTierEntries(model);
     configureRuntimeRange($("#newEffort"), reasoningEffortEntries(model), model?.defaultReasoningEffort || "");
-    configureRuntimeRange($("#newServiceTier"), [{ value: "", label: "默认" }, ...(tiers[0] ? [{ value: tiers[0].id, label: "高" }] : [])]);
-    $("#newServiceTierField")?.classList.toggle("field-disabled", tiers.length === 0);
+    configureRuntimeRange($("#newServiceTier"), accountTierEntries(tiers, ""));
+    $("#newServiceTierField")?.classList.toggle("field-disabled", accountTierEntries(tiers, "").length < 2);
   }
 
   function selectedComposerModel() {
@@ -596,8 +643,8 @@
     const previousTier = resetEffort ? (currentServiceTier() || "__default__") : runtimeRangeValue(tierInput);
     const activeTier = currentServiceTier();
     const highTier = tiers[0]?.id || "";
-    configureRuntimeRange(tierInput, [{ value: "__default__", label: "默认" }, ...(highTier ? [{ value: highTier, label: "高" }] : [])], activeTier === highTier ? highTier : previousTier);
-    $("#composerServiceTierField").classList.toggle("field-disabled", !highTier);
+    configureRuntimeRange(tierInput, accountTierEntries(tiers, "__default__"), activeTier === highTier ? highTier : previousTier);
+    $("#composerServiceTierField").classList.toggle("field-disabled", accountTierEntries(tiers, "__default__").length < 2);
     const supportsPersonality = Boolean(model?.supportsPersonality);
     $("#composerPersonalityField").hidden = !supportsPersonality;
     $("#composerPersonality").disabled = !supportsPersonality;
@@ -791,7 +838,7 @@
 
   function scheduleStateRefresh() {
     clearTimeout(state.refreshTimer);
-    if (!state.authenticated || document.hidden) return;
+    if (!state.authenticated || state.announcementPending || document.hidden) return;
     // ponytail: bounded snapshot polling covers other Codex clients; switch to
     // revision-based reads when the backend exposes a reliable revision.
     state.refreshTimer = setTimeout(async () => {
@@ -807,7 +854,7 @@
   function composerDraft(threadId) {
     if (!state.composerDrafts.has(threadId)) {
       let text = "";
-      try { text = localStorage.getItem(DRAFT_STORAGE_KEY + threadId) || ""; } catch {}
+      try { text = accountStorage.getItem(DRAFT_STORAGE_KEY + threadId) || ""; } catch {}
       state.composerDrafts.set(threadId, { text, files: [] });
     }
     return state.composerDrafts.get(threadId);
@@ -816,8 +863,8 @@
   function persistComposerDraft(threadId) {
     const draft = composerDraft(threadId);
     try {
-      if (draft.text) localStorage.setItem(DRAFT_STORAGE_KEY + threadId, draft.text);
-      else localStorage.removeItem(DRAFT_STORAGE_KEY + threadId);
+      if (draft.text) accountStorage.setItem(DRAFT_STORAGE_KEY + threadId, draft.text);
+      else accountStorage.removeItem(DRAFT_STORAGE_KEY + threadId);
     } catch {
       toast("浏览器未能保存草稿，请勿关闭页面", "warning");
     }
@@ -843,13 +890,13 @@
   }
 
   function readSubmission(key) {
-    try { return JSON.parse(localStorage.getItem(SUBMISSION_STORAGE_KEY + key) || "null"); }
+    try { return JSON.parse(accountStorage.getItem(SUBMISSION_STORAGE_KEY + key) || "null"); }
     catch { return null; }
   }
 
   function saveSubmission(key, value) {
-    if (value) localStorage.setItem(SUBMISSION_STORAGE_KEY + key, JSON.stringify(value));
-    else localStorage.removeItem(SUBMISSION_STORAGE_KEY + key);
+    if (value) accountStorage.setItem(SUBMISSION_STORAGE_KEY + key, JSON.stringify(value));
+    else accountStorage.removeItem(SUBMISSION_STORAGE_KEY + key);
   }
 
   function submissionIsUncertain(error) {
@@ -906,8 +953,8 @@
   }
 
   function persistSubagentPreferences() {
-    localStorage.setItem("codex-remote:subagent-model", $("#subagentModelPreference").value);
-    localStorage.setItem("codex-remote:subagent-effort", $("#subagentEffortPreference").value);
+    accountStorage.setItem("codex-remote:subagent-model", $("#subagentModelPreference").value);
+    accountStorage.setItem("codex-remote:subagent-effort", $("#subagentEffortPreference").value);
   }
 
   function createSubagentPromptTemplate() {
@@ -1225,7 +1272,7 @@
     panel.classList.toggle("previewing", Boolean(state.agentPreviewId));
     panel.dataset.loading = String(Boolean(state.subagentLoading && state.subagentLoadingRoot === rootId));
     if (!state.subagentPanelOpen) return;
-    $("#subagentTree").hidden = Boolean(state.agentPreviewId);
+    $("#subagentTree").hidden = Boolean(state.agentPreviewId) || state.user?.id && state.user.id !== "admin";
     $(".subagent-command-settings", panel).hidden = Boolean(state.agentPreviewId);
     $("#subagentPreview").hidden = !state.agentPreviewId;
     if (state.agentPreviewId) {
@@ -1833,12 +1880,12 @@
     const sending = state.sendingThreads.has(state.selectedId);
     const pending = readSubmission(state.selectedId);
     $("#interruptMenuButton").hidden = !active;
-    $("#sendButton").disabled = sending;
+    $("#sendButton").disabled = sending || !canUse("chat");
     $("#sendButton").setAttribute("aria-busy", String(sending));
     $("#sendLabel").textContent = sending ? "发送中…" : pending ? "核对发送" : active ? "发送引导" : "发送";
-    $("#composerHint").textContent = pending ? "核对上次提交，当前草稿不会被重新发送" : state.composerFiles.length ? "草稿与附件按任务保存" : active ? "追加指令给当前任务 · Ctrl + Enter 发送" : "草稿按任务保存 · Ctrl + Enter 发送";
-    $("#composerModel").disabled = active;
-    $("#composerEffort").disabled = active;
+    $("#composerHint").textContent = !canUse("chat") ? "当前账户仅可查看会话" : pending ? "核对上次提交，当前草稿不会被重新发送" : state.composerFiles.length ? "草稿与附件按任务保存" : active ? "追加指令给当前任务 · Ctrl + Enter 发送" : "草稿按任务保存 · Ctrl + Enter 发送";
+    $("#composerModel").disabled = active || state.models.length === 1;
+    $("#composerEffort").disabled = active || reasoningEffortEntries(selectedComposerModel()).length < 2;
     $("#composerServiceTier").disabled = active || $("#composerServiceTierField").classList.contains("field-disabled");
     $("#composerPersonality").disabled = active || $("#composerPersonalityField").hidden;
     $(".composer-settings").classList.toggle("locked", active);
@@ -2075,6 +2122,7 @@
       xhr.onloadend = () => { delete attachment.xhr; };
       xhr.responseType = "json";
       xhr.setRequestHeader("Content-Type", attachment.type || "application/octet-stream");
+      if (state.user?.id) xhr.setRequestHeader("X-Remote-Account", state.user.id);
       xhr.upload.onprogress = (event) => onProgress(event.loaded);
       xhr.onload = () => {
         const payload = xhr.response || {};
@@ -2129,7 +2177,12 @@
     const files = [...state.newThreadFiles];
     const cwd = $("#newCwd").value.trim();
     const prompt = $("#newPrompt").value;
-    if (!submission && (!cwd || (!prompt.trim() && !files.length))) return;
+    if (!submission && (!cwd || !isWorkspaceAllowed(cwd))) {
+      $("#newThreadStatus").textContent = "请先选择可用的工作目录";
+      $("#newThreadStatus").hidden = false;
+      return;
+    }
+    if (!submission && !prompt.trim() && !files.length) return;
     state.creatingThread = true;
     setBusy(button, true, "正在创建…");
     try {
@@ -2172,7 +2225,7 @@
       state.selectedProject = submission.params.cwd;
       rememberWorkspaceThreads([thread]);
       renderThreadList();
-      try { localStorage.setItem("codex-remote:last-cwd", submission.params.cwd); } catch {}
+      try { accountStorage.setItem("codex-remote:last-cwd", submission.params.cwd); } catch {}
       closeDialog($("#newThreadDialog"));
       if ($("#newPrompt").value === submission.text) $("#newPrompt").value = "";
       state.newThreadFiles = state.newThreadFiles.filter((file) => !draft.files.includes(file));
@@ -2219,12 +2272,28 @@
     renderNewThreadRecovery();
     showDialog($("#newThreadDialog"));
     if (!state.workspaceDiscoveryLoaded) syncWorkspaceDirectories(false).catch(() => {});
-    loadDirectory("/");
+    return loadDirectory(defaultWorkspaceDirectory());
+  }
+
+  function allowedWorkspaceRoots() {
+    if (state.user && state.user.id !== "admin") return state.user.workspaces || [];
+    return state.workspaceMode === "restricted" ? state.workspaceRoots : null;
+  }
+
+  function isWorkspaceAllowed(path) {
+    const roots = allowedWorkspaceRoots();
+    return Boolean(path?.startsWith("/")) && (!roots || roots.some(root => path === root || path.startsWith(`${root.replace(/\/+$/, "")}/`)));
+  }
+
+  function defaultWorkspaceDirectory() {
+    let previous = "";
+    try { previous = accountStorage.getItem("codex-remote:last-cwd") || ""; } catch {}
+    return [state.selectedProject, previous, ...(allowedWorkspaceRoots() || []), "/"].find(isWorkspaceAllowed) || "/";
   }
 
   function loadStoredWorkspaceDirectories() {
     try {
-      const stored = JSON.parse(localStorage.getItem("codex-remote:project-directories") || "[]");
+      const stored = JSON.parse(accountStorage.getItem("codex-remote:project-directories") || "[]");
       if (Array.isArray(stored)) state.workspaceDirectories = stored.filter((path) => typeof path === "string" && path.startsWith("/"));
     } catch {
       state.workspaceDirectories = [];
@@ -2245,7 +2314,7 @@
     }
     if (changed) {
       state.workspaceDirectories.sort((left, right) => left.localeCompare(right, "zh-CN"));
-      try { localStorage.setItem("codex-remote:project-directories", JSON.stringify(state.workspaceDirectories)); } catch {}
+      try { accountStorage.setItem("codex-remote:project-directories", JSON.stringify(state.workspaceDirectories)); } catch {}
     }
     renderWorkspaceDirectories();
   }
@@ -2257,13 +2326,12 @@
       renderWorkspaceDirectories();
       return;
     }
-    const withinRoot = (path) => state.workspaceRoots.some((root) => path === root || path.startsWith(`${root.replace(/\/+$/, "")}/`));
-    state.workspaceDirectories = state.workspaceDirectories.filter(withinRoot);
+    state.workspaceDirectories = state.workspaceDirectories.filter(isWorkspaceAllowed);
     for (const [threadId, thread] of state.workspaceThreads) {
-      if (!withinRoot(thread.cwd)) state.workspaceThreads.delete(threadId);
+      if (!isWorkspaceAllowed(thread.cwd)) state.workspaceThreads.delete(threadId);
     }
-    try { localStorage.setItem("codex-remote:project-directories", JSON.stringify(state.workspaceDirectories)); } catch {}
-    if (hint) hint.textContent = `当前服务已显式收窄到 ${state.workspaceRoots.length} 个目录`;
+    try { accountStorage.setItem("codex-remote:project-directories", JSON.stringify(state.workspaceDirectories)); } catch {}
+    if (hint) hint.textContent = `可使用 ${state.workspaceRoots.length} 个工作区`;
     renderWorkspaceDirectories();
   }
 
@@ -2275,13 +2343,14 @@
 
   async function loadDirectory(path) {
     const list = $("#directoryEntries");
+    $("#newCwd").value = "";
     list.innerHTML = '<div class="list-skeleton"><i></i><i></i><i></i></div>';
     try {
       const result = await request(`/api/directories?path=${encodeURIComponent(path || "/")}`);
       state.directoryPath = result.path || "/";
       state.directoryParent = result.parent || "";
-      $("#newCwd").value = state.directoryPath;
-      $("#directoryCurrentPath").textContent = state.directoryPath;
+      $("#newCwd").value = isWorkspaceAllowed(state.directoryPath) ? state.directoryPath : "";
+      $("#directoryCurrentPath").textContent = $("#newCwd").value || "选择工作区";
       $("#directoryUpButton").disabled = !state.directoryParent;
       $("#knownWorkspaceSelect").value = state.workspaceDirectories.includes(state.directoryPath) ? state.directoryPath : "";
       const entries = Array.isArray(result.entries) ? result.entries : [];
@@ -2472,7 +2541,7 @@
   function attachmentStore(mode, key, value) {
     if (!("indexedDB" in window)) return Promise.resolve(null);
     state.draftDB ||= new Promise((resolve, reject) => {
-      const request = indexedDB.open("codex-remote-drafts", 1);
+      const request = indexedDB.open(state.user?.id && state.user.id !== "admin" ? `codex-remote-drafts-${state.user.id}` : "codex-remote-drafts", 1);
       request.onupgradeneeded = () => request.result.createObjectStore("files");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
@@ -2841,6 +2910,7 @@
   }
 
   async function loadRequests() {
+    if (!canUse("requests")) return;
     try {
       const payload = await request("/api/requests");
       const root = payload && Object.prototype.hasOwnProperty.call(payload, "result") ? payload.result : payload;
@@ -3251,7 +3321,7 @@
   }
 
 
-  const CLIENT_VERSION = "0.7.1";
+  const CLIENT_VERSION = "0.8.1";
 
   function diagnosticText() {
     const backend = state.backendStatus?.backend || state.backendStatus || {};
@@ -3307,7 +3377,7 @@
 
   function loadThemePreference() {
     let theme = "system";
-    try { theme = localStorage.getItem(THEME_STORAGE_KEY) || "system"; } catch {}
+    try { theme = accountStorage.getItem(THEME_STORAGE_KEY) || "system"; } catch {}
     setThemePreference(theme, false);
   }
 
@@ -3322,14 +3392,14 @@
     if (select) select.value = state.theme;
     if (!persist) return;
     try {
-      if (state.theme === "system") localStorage.removeItem(THEME_STORAGE_KEY);
-      else localStorage.setItem(THEME_STORAGE_KEY, state.theme);
+      if (state.theme === "system") accountStorage.removeItem(THEME_STORAGE_KEY);
+      else accountStorage.setItem(THEME_STORAGE_KEY, state.theme);
     } catch {}
   }
 
   function loadTextSizePreference() {
     let size = 16;
-    try { size = Number(localStorage.getItem(TEXT_SIZE_STORAGE_KEY)) || 16; } catch {}
+    try { size = Number(accountStorage.getItem(TEXT_SIZE_STORAGE_KEY)) || 16; } catch {}
     setTextSizePreference(size, false);
   }
 
@@ -3341,7 +3411,84 @@
     if (input) input.value = String(state.textSize);
     if (output) output.textContent = `${state.textSize} px`;
     if (!persist) return;
-    try { localStorage.setItem(TEXT_SIZE_STORAGE_KEY, String(state.textSize)); } catch {}
+    try { accountStorage.setItem(TEXT_SIZE_STORAGE_KEY, String(state.textSize)); } catch {}
+  }
+
+  function canUse(permission) { return !state.user || state.user.id === "admin" || state.user.permissions?.includes(permission); }
+
+  function accountTierEntries(tiers, defaultValue) {
+    const entries = [{ value: defaultValue, label: "标准" }, ...tiers.map(tier => ({ value: tier.id, label: tier.name || tier.id }))];
+    const allowed = state.user?.serviceTiers;
+    if (!allowed?.length) return entries;
+    return allowed.map(id => id === "default" ? entries[0] : entries.find(entry => entry.value === id) || { value: id, label: id });
+  }
+
+  function applyAccountUI() {
+    $("#currentAccountName").textContent = state.user?.name || "管理员";
+    $("#currentAccountScope").textContent = state.user?.id === "admin" ? "管理员 · 全部功能与工作区" : `${state.admin ? "管理员正在查看 · " : ""}${state.user?.access === "workspace-write" ? "工作区读写" : "只读工作区"}`;
+    $("#openUsers").hidden = !state.admin;
+    $("#accountViewControl").hidden = !state.admin;
+    $("#workstationAuthControl").hidden = state.user?.id !== "admin";
+    for (const [permission, selectors] of Object.entries({ chat: '[data-action="new-thread"]', files: '[data-thread-action="files"]', uploads: '#uploadsButton', requests: '#requestsButton, [data-thread-action="requests"]', review: '[data-thread-action="review"]', goals: '#goalButton, [data-thread-action="goal"]', archive: '#archiveMenuButton' })) {
+      $$(selectors).forEach(button => { button.hidden = !canUse(permission); });
+    }
+    $(".subagent-command-settings").hidden = state.user?.id !== "admin";
+    for (const id of ["composerFileInput", "newThreadFileInput"]) $("#" + id).parentElement.hidden = !canUse("uploads");
+  }
+
+  function userMessage(message, error = false) {
+    $("#userMessage").textContent = message;
+    $("#userMessage").dataset.error = String(error);
+  }
+  async function loadUsers() {
+    const result = await request("/api/users");
+    state.users = result.data || [];
+    const options = state.users.map(user => `<option value="${escapeHtml(user.id)}">${escapeHtml(user.name)}${user.disabled ? " · 已停用" : ""}</option>`).join("");
+    $("#userSelect").innerHTML = '<option value="">新建用户</option>' + options;
+    $("#accountView").innerHTML = '<option value="">管理员</option>' + options;
+    $("#accountView").value = state.user?.id === "admin" ? "" : state.user?.id || "";
+  }
+  function editUser(id) {
+    const user = state.users.find(user => user.id === id);
+    state.editingUser = user || null;
+    $("#userSelect").value = id;
+    $("#userName").value = user?.name || "";
+    $("#userAnnouncement").value = user?.announcement || "";
+    $("#userPassword").value = "";
+    $("#userPassword").required = !user;
+    $("#userWorkspaces").value = (user?.workspaces || []).join("\n");
+    $("#userModels").value = (user?.models || []).join("\n");
+    $("#userAccess").value = user?.access || "read-only";
+    $("#userNetwork").checked = user?.network || false;
+    $("#userDisabled").checked = user?.disabled || false;
+    $("#userServiceTiers").value = (user?.serviceTiers || []).join(", ");
+    $$("#userPermissions input").forEach(input => { input.checked = (user?.permissions || ["chat", "files", "uploads", "requests"]).includes(input.value); });
+    $$("#userEfforts input").forEach(input => { input.checked = (user?.efforts || []).includes(input.value); });
+    $("#userModelHint").textContent = "当前可用：" + state.models.map(modelValue).join("、");
+    $("#deleteUser").hidden = !user;
+    $("#saveUser").textContent = user ? "保存权限" : "创建用户";
+    userMessage("");
+  }
+  async function saveUser(event) {
+    event.preventDefault();
+    const split = value => [...new Set(value.split(/[\n,，]+/).map(item => item.trim()).filter(Boolean))];
+    const user = { id: state.editingUser?.id || "", revision: state.editingUser?.revision || "", name: $("#userName").value,
+      workspaces: $("#userWorkspaces").value.split("\n").map(path => path.trim()).filter(Boolean), models: split($("#userModels").value),
+      efforts: $$("#userEfforts input:checked").map(input => input.value), serviceTiers: split($("#userServiceTiers").value),
+      permissions: $$("#userPermissions input:checked").map(input => input.value), access: $("#userAccess").value,
+      announcement: $("#userAnnouncement").value, network: $("#userNetwork").checked, disabled: $("#userDisabled").checked };
+    setBusy($("#saveUser"), true, "保存中…");
+    try {
+      const result = await request("/api/users", { method: "POST", body: JSON.stringify({ action: "save", user, password: $("#userPassword").value }) });
+      await loadUsers(); editUser(result.user.id); userMessage("已保存。该用户下次登录使用新配置。");
+    } catch (error) { userMessage(readableError(error), true); }
+    finally { setBusy($("#saveUser"), false); }
+  }
+  async function deleteUser() {
+    const user = state.editingUser;
+    if (!user || !confirm(`删除用户“${user.name}”？其登录将失效，工作区文件与历史目录保留。`)) return;
+    try { await request("/api/users", { method: "POST", body: JSON.stringify({ action: "delete", user }) }); await loadUsers(); editUser(""); userMessage("用户已删除。"); }
+    catch (error) { userMessage(readableError(error), true); }
   }
 
   function renderConfigEditor(id) {
@@ -3423,6 +3570,7 @@
     const eventQuery = new URLSearchParams();
     if (state.lastEventId) eventQuery.set("after", state.lastEventId);
     if (state.eventInstanceId) eventQuery.set("instance", state.eventInstanceId);
+    if (state.user?.id) eventQuery.set("account", state.user.id);
     const eventsUrl = eventQuery.size ? `/api/events?${eventQuery}` : "/api/events";
     const source = new EventSource(eventsUrl, { withCredentials: true });
     state.eventSource = source;
@@ -3472,6 +3620,7 @@
   }
 
   function reconnectNow() {
+    if (state.announcementPending) return;
     state.reconnectAttempt = 0;
     connectEvents();
     refreshStatus().catch(() => {});
@@ -3904,6 +4053,7 @@
 
   function closeDialog(dialog) {
     if (!dialog?.open) return;
+    if (dialog.id === "announcementDialog" && state.announcementPending) return;
     if (dialog.id === "codexSettingsDialog" && state.authenticated) {
       if (state.codexSettingsBusy) return;
       if (state.codexSettingsDirty && !confirm("认证配置有未保存的编辑，放弃并关闭？")) return;

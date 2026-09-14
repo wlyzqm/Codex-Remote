@@ -10,7 +10,7 @@ function appInternals(elements = {}, globals = {}, overrides = {}) {
   const replacements = Object.keys(overrides).map((name) => `${name} = globalThis.__testOverrides.${name};`).join("\n");
   const source = fs.readFileSync(path, "utf8").replace(
     /\n\}\)\(\);\s*$/,
-    `\n ${replacements}\n  globalThis.__appTest = { renderTimeline, renderProjectDirectory, state, loadThreads, renderGoalUsage, scheduleStateRefresh, saveComposerDraft, restoreComposerDraft, composerDraft, saveSubmission, readSubmission, sendComposer, deliverComposerSubmission, createThread, HttpError, upsertTurn, appendItemField, mergeLiveThreadSnapshot, mergeTimelineItem, incrementalReasoningItem, rateWindowHtml, renderItem, codeLanguage, highlightSource, resolveLocalImage, visibleChildTurns, composerDeliveryAccepted, setComposerDelivery, renderComposerDelivery, dismissComposerDelivery };\n})();`,
+    `\n ${replacements}\n  globalThis.__appTest = { CLIENT_VERSION, renderDiagnostics, defaultWorkspaceDirectory, openNewThreadDialog, loadDirectory, accountStorageKey, accountTierEntries, reasoningEffortEntries, renderTimeline, renderProjectDirectory, state, loadThreads, renderGoalUsage, scheduleStateRefresh, saveComposerDraft, restoreComposerDraft, composerDraft, saveSubmission, readSubmission, sendComposer, deliverComposerSubmission, createThread, HttpError, upsertTurn, appendItemField, mergeLiveThreadSnapshot, mergeTimelineItem, incrementalReasoningItem, rateWindowHtml, renderItem, codeLanguage, highlightSource, resolveLocalImage, visibleChildTurns, composerDeliveryAccepted, setComposerDelivery, renderComposerDelivery, dismissComposerDelivery };\n})();`,
   );
   const context = { document: { addEventListener() {}, querySelector: (selector) => elements[selector] || null, querySelectorAll: () => [] }, window: {}, console, __testOverrides: overrides, ...globals };
   vm.runInNewContext(source, context, { filename: path });
@@ -388,4 +388,85 @@ test("timeline keeps reading position after full DOM replacement, including deta
  renderTimeline();assert.equal(top,700);
  state.timelineInteractionUntil=Date.now()+10000;top=1300;renderTimeline();assert.equal(top,1300);
  state.timelineInteractionUntil=0;top=1300;renderTimeline();assert.equal(top,1800);
+});
+
+
+test("account storage and runtime choices follow the signed-in account", () => {
+  const storage = new Map();
+  const { state, accountStorageKey, saveSubmission, readSubmission, accountTierEntries, reasoningEffortEntries } = appInternals({}, { localStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) } });
+  state.user = { id: "alice", serviceTiers: ["fast"], efforts: ["low"] };
+  saveSubmission("new", { id: "alice-draft" });
+  assert.match(accountStorageKey("codex-remote:project-directories"), /alice/);
+  assert.equal(accountStorageKey("codex-remote:theme"), "codex-remote:theme");
+  assert.deepEqual(Array.from(accountTierEntries([{ id: "fast", name: "Fast" }], ""), entry => entry.value), ["fast"]);
+  assert.deepEqual(Array.from(reasoningEffortEntries({ supportedReasoningEfforts: ["low"] }), entry => entry.value), ["low"]);
+  state.user = { id: "bob" };
+  assert.equal(readSubmission("new"), null);
+  state.user = { id: "alice" };
+  assert.equal(readSubmission("new").id, "alice-draft");
+});
+
+
+test("update notice only appears for a different receiver version", () => {
+  const notice = {};
+  const { CLIENT_VERSION, state, renderDiagnostics } = appInternals(
+    { "#diagnostics": {}, "#clientUpdateNotice": notice },
+    { navigator: { onLine: true, userAgent: "test" } },
+  );
+  const receiverSource = fs.readFileSync(require.resolve("../receive/cmd/codex-remote/main.go"), "utf8");
+  assert.equal(CLIENT_VERSION, receiverSource.match(/var version = "([^"]+)"/)[1]);
+  for (const [version, hidden] of [[undefined, true], [CLIENT_VERSION, true], ["next-version", false]]) {
+    state.backendStatus = { receiverVersion: version };
+    renderDiagnostics();
+    assert.equal(notice.hidden, hidden);
+  }
+});
+
+
+test("new conversations open an allowed project without selecting the virtual root", async () => {
+  const storage = memoryStorage();
+  const elements = new Proxy({}, { get: (target, key) => target[key] ||= { value: "", hidden: true, textContent: "", dataset: {} } });
+  let requested;
+  const app = appInternals(elements, { localStorage: storage }, {
+    restoreDraftFiles() {}, renderWorkspaceDirectories() {}, renderNewThreadRecovery() {}, showDialog() {},
+    request: async url => { requested = new URL(url, "http://test").searchParams.get("path"); return { path: requested, entries: [] }; },
+  });
+  app.state.workspaceDiscoveryLoaded = true;
+  app.state.user = { id: "user-a", workspaces: ["/workspace/a", "/workspace/b"] };
+  // Session permissions are available before the status request finishes.
+  await app.openNewThreadDialog();
+  assert.equal(requested, "/workspace/a");
+  assert.equal(elements["#newCwd"].value, "/workspace/a");
+  storage.setItem(app.accountStorageKey("codex-remote:last-cwd"), "/workspace/b/child");
+  assert.equal(app.defaultWorkspaceDirectory(), "/workspace/b/child");
+  app.state.selectedProject = "/workspace/a/project";
+  assert.equal(app.defaultWorkspaceDirectory(), "/workspace/a/project");
+  app.state.selectedProject = "/workspace/another";
+  storage.setItem(app.accountStorageKey("codex-remote:last-cwd"), "/workspace/a-other");
+  assert.equal(app.defaultWorkspaceDirectory(), "/workspace/a");
+  await app.loadDirectory("/");
+  assert.equal(elements["#newCwd"].value, "");
+  assert.equal(elements["#directoryCurrentPath"].textContent, "选择工作区");
+  app.state.user = { id: "user-b", workspaces: ["/workspace/b"] };
+  assert.equal(app.defaultWorkspaceDirectory(), "/workspace/b");
+  app.state.user = { id: "admin" };
+  app.state.selectedProject = "";
+  assert.equal(app.defaultWorkspaceDirectory(), "/");
+  app.state.workspaceMode = "restricted"; app.state.workspaceRoots = ["/restricted"];
+  assert.equal(app.defaultWorkspaceDirectory(), "/restricted");
+});
+
+test("a rejected unsent creation can be corrected while an uncertain creation keeps its ID", async () => {
+  for (const code of ["submission_not_sent", "remote_policy_rejected"]) {
+    const elements = new Proxy({}, { get: (target, key) => target[key] ||= { value: "", hidden: true, textContent: "", dataset: {} } });
+    const app = appInternals(elements, { localStorage: memoryStorage() }, {
+      setBusy() {}, clearUploadProgress() {},
+      rpc: async () => { throw new app.HttpError("请选择允许的工作区", 403, { error: { code } }); },
+    });
+    app.saveSubmission("new", { id: "old-create-id", params: { cwd: "/" } });
+    await app.createThread({ preventDefault() {} });
+    assert.equal(Boolean(app.readSubmission("new")), code !== "submission_not_sent");
+    assert.equal(elements["#createThreadSubmit"].textContent, code === "submission_not_sent" ? "创建并发送" : "核对创建");
+    assert.equal(elements["#newThreadForm"].noValidate, code !== "submission_not_sent");
+  }
 });

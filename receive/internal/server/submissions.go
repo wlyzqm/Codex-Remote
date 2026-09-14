@@ -23,6 +23,19 @@ func (s *Server) submissionPath(id string) string {
 	return filepath.Join(s.cfg.UploadRoot, ".submissions", id+".json")
 }
 
+// A policy rejection is safe to correct only if this ID has never reached Codex.
+// An existing record may represent a previous send whose reply was lost.
+func (s *Server) rejectSubmission(w http.ResponseWriter, id, code, message string) {
+	s.submissionMu.Lock()
+	defer s.submissionMu.Unlock()
+	if submissionIDPattern.MatchString(id) {
+		if _, err := os.Stat(s.submissionPath(id)); errors.Is(err, os.ErrNotExist) {
+			code = "submission_not_sent"
+		}
+	}
+	writeError(w, http.StatusForbidden, code, message)
+}
+
 // beginSubmission reserves an ID before sending anything to Codex. A pending
 // record left by a restart is uncertain and must never execute a second time.
 func (s *Server) beginSubmission(w http.ResponseWriter, id, method string, params json.RawMessage) bool {

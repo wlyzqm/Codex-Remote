@@ -47,6 +47,9 @@ type Backend interface {
 }
 
 type Config struct {
+	UserRoot            string
+	PasswordFile        string
+	User                *User
 	CodexHome           string
 	Password            string
 	SessionKey          string
@@ -61,6 +64,7 @@ type Config struct {
 }
 
 type Server struct {
+	users        *userManager
 	settingsMu   sync.Mutex
 	activity     *activityStore
 	cfg          Config
@@ -138,6 +142,9 @@ func New(cfg Config, backend Backend, broker *events.Broker) (*Server, error) {
 	if cfg.UploadRoot, err = filepath.EvalSymlinks(cfg.UploadRoot); err != nil {
 		return nil, err
 	}
+	if cfg.UserRoot == "" {
+		cfg.UserRoot = filepath.Join(filepath.Dir(cfg.UploadRoot), "users")
+	}
 	s := &Server{
 		cfg: cfg, backend: backend, broker: broker, mux: http.NewServeMux(), limiter: newLoginLimiter(),
 		rpcSlots: make(chan struct{}, 16),
@@ -147,14 +154,19 @@ func New(cfg Config, backend Backend, broker *events.Broker) (*Server, error) {
 	if err := s.loadActivity(); err != nil {
 		return nil, err
 	}
-	if err := s.recoverSettings(); err != nil {
-		return nil, err
+	if cfg.User == nil {
+		if err := s.recoverSettings(); err != nil {
+			return nil, err
+		}
 	}
 	s.routes()
 	return s, nil
 }
 
 func (s *Server) Handler() http.Handler {
+	if s.users != nil && s.cfg.User == nil {
+		return s.securityHeaders(http.HandlerFunc(s.users.serve))
+	}
 	return s.securityHeaders(s.mux)
 }
 
@@ -202,7 +214,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if !auth.EqualPassword(s.cfg.Password, body.Password) {
+	account, valid := "", auth.EqualPassword(s.cfg.Password, body.Password)
+	if s.users != nil {
+		select {
+		case s.users.loginSlot <- struct{}{}:
+			defer func() { <-s.users.loginSlot }()
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeError(w, 429, "login_busy", "正在验证其他登录，请稍后重试")
+			return
+		}
+		account, valid = s.users.login(body.Password)
+	}
+	if !valid {
 		s.limiter.Failure(clientIP, time.Now())
 		time.Sleep(120 * time.Millisecond)
 		writeError(w, http.StatusUnauthorized, "invalid_password", "访问密码错误")
@@ -211,6 +235,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.limiter.Success(clientIP)
 	expires := time.Now().Add(s.cfg.SessionTTL)
 	value, err := auth.IssueSession(s.cfg.SessionKey, expires)
+	if account != "" {
+		value, err = auth.IssueAccountSession(s.cfg.SessionKey, account, expires)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", "无法创建会话")
 		return
@@ -225,6 +252,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   s.isSecure(r),
 		SameSite: http.SameSiteStrictMode,
 	})
+	if _, err := r.Cookie("codex_remote_view"); err == nil {
+		http.SetCookie(w, &http.Cookie{Name: "codex_remote_view", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.isSecure(r), SameSite: http.SameSiteStrictMode})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true})
 }
 
@@ -334,32 +364,53 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 	if body.Method == "thread/start" || body.Method == "thread/resume" || body.Method == "thread/fork" {
 		params, err = s.cfg.Paths.SanitizeLaunchParams(body.Method, params)
 		if err != nil {
-			writeError(w, http.StatusForbidden, "remote_policy_rejected", err.Error())
+			s.rejectSubmission(w, body.ClientRequestID, "remote_policy_rejected", err.Error())
 			return
 		}
 	} else if body.Method == "turn/start" || body.Method == "turn/steer" {
 		params, err = policy.SanitizeTurnParamsWithLocalImages(body.Method, params, func(path string) error {
 			_, checkErr := s.cfg.Paths.CheckTarget(path)
+			if checkErr != nil {
+				_, checkErr = s.uploadedFileTarget(path)
+			}
 			return checkErr
 		})
 		if err != nil {
-			writeError(w, http.StatusForbidden, "remote_policy_rejected", err.Error())
+			s.rejectSubmission(w, body.ClientRequestID, "remote_policy_rejected", err.Error())
 			return
 		}
 	} else if body.Method == "modelProvider/capabilities/read" || body.Method == "thread/compact/start" || body.Method == "review/start" {
 		params, err = policy.SanitizeRichClientParams(body.Method, params)
 		if err != nil {
-			writeError(w, http.StatusForbidden, "remote_policy_rejected", err.Error())
+			s.rejectSubmission(w, body.ClientRequestID, "remote_policy_rejected", err.Error())
 			return
 		}
 	} else {
 		params, err = policy.SanitizeStandardClientParams(body.Method, params)
 		if err != nil {
-			writeError(w, http.StatusForbidden, "remote_policy_rejected", err.Error())
+			s.rejectSubmission(w, body.ClientRequestID, "remote_policy_rejected", err.Error())
 			return
 		}
 	}
-	if requiresExistingThread(body.Method) && !s.cfg.Paths.Unrestricted() {
+	if s.cfg.User != nil && (body.Method == "thread/resume" || body.Method == "thread/fork") {
+		var input map[string]any
+		_ = json.Unmarshal(params, &input)
+		if input["cwd"] == nil {
+			workspace, checkErr := s.threadWorkspace(r.Context(), policy.ThreadID(params))
+			if checkErr != nil {
+				writeError(w, 403, "thread_not_allowed", "会话不可访问")
+				return
+			}
+			input["cwd"] = workspace
+			params, _ = json.Marshal(input)
+		}
+	}
+	params, err = s.sanitizeUserParams(body.Method, params)
+	if err != nil {
+		s.rejectSubmission(w, body.ClientRequestID, "permission_denied", err.Error())
+		return
+	}
+	if (requiresExistingThread(body.Method) || body.Method == "thread/read") && !s.cfg.Paths.Unrestricted() {
 		threadID := policy.ThreadID(params)
 		if threadID == "" {
 			writeError(w, http.StatusBadRequest, "thread_id_required", "缺少 threadId")
@@ -414,6 +465,13 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": rpcErr})
 		return
+	}
+	if body.Method == "model/list" && s.cfg.User != nil {
+		result, err = s.filterUserModels(result)
+		if err != nil {
+			writeError(w, 502, "invalid_models", err.Error())
+			return
+		}
 	}
 	if body.Method == "thread/list" {
 		result, err = s.filterThreadList(result)
@@ -960,6 +1018,9 @@ func (s *Server) projectPath(workspace, requested string) (string, string, error
 		requested = filepath.Join(workspace, requested)
 	}
 	canonical, err := filepath.EvalSymlinks(requested)
+	if err == nil && s.cfg.User != nil {
+		canonical, err = s.cfg.Paths.CheckTarget(canonical)
+	}
 	if err != nil {
 		return "", "", err
 	}
@@ -1001,6 +1062,11 @@ func (s *Server) writeProjectDirectory(w http.ResponseWriter, directory *os.File
 	if relative != "" {
 		parent = filepath.ToSlash(filepath.Dir(filepath.FromSlash(relative)))
 		if parent == "." {
+			parent = ""
+		}
+	}
+	if s.cfg.User != nil && parent != "" {
+		if _, err := s.cfg.Paths.Check(parent); err != nil {
 			parent = ""
 		}
 	}
@@ -1114,11 +1180,29 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "authentication_required", "需要登录")
 			return
 		}
+		if !s.allowEndpoint(r) {
+			writeError(w, 403, "permission_denied", "当前账户没有此操作权限")
+			return
+		}
 		next(w, r)
 	}
 }
 
 func (s *Server) authenticated(r *http.Request) bool {
+	if s.users != nil {
+		id, valid := s.users.identity(r)
+		if !valid {
+			return false
+		}
+		if id == "" {
+			return true
+		}
+		return s.cfg.User != nil && id == s.cfg.User.ID && func() bool {
+			c, _ := s.sessionCookie(r)
+			a, _ := auth.SessionAccount(s.cfg.SessionKey, c.Value, time.Now())
+			return a == s.cfg.User.account()
+		}()
+	}
 	cookie, err := s.sessionCookie(r)
 	if err != nil || !auth.ValidateSession(s.cfg.SessionKey, cookie.Value, time.Now()) {
 		return false

@@ -205,9 +205,14 @@ func (c *Client) Call(ctx context.Context, method string, params json.RawMessage
 	// explicit not-found response, never a timeout or unknown transport result.
 	if err == nil && rpcErr != nil && method == "turn/start" && strings.HasPrefix(rpcErr.Message, "thread not found:") {
 		var input struct {
-			ThreadID string `json:"threadId"`
+			ThreadID    string `json:"threadId"`
+			Permissions string `json:"permissions"`
 		}
 		if json.Unmarshal(params, &input) == nil && input.ThreadID != "" {
+			// The account adapter restores named profiles with their config overrides.
+			if input.Permissions != "" {
+				return result, rpcErr, err
+			}
 			resume, _ := json.Marshal(map[string]any{"threadId": input.ThreadID, "approvalPolicy": "never", "sandbox": "danger-full-access"})
 			_, resumeRPC, resumeErr := c.callOn(ctx, transport, generation, "thread/resume", resume)
 			if resumeErr != nil {
